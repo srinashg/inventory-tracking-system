@@ -13,6 +13,7 @@ TechStore is an internal web application for an electronics retailer. Employees 
 - [Backup and restore](#backup-and-restore)
 - [Running without Docker (development)](#running-without-docker-development)
 - [Running the tests](#running-the-tests)
+- [Working with Git and GitHub](#working-with-git-and-github)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations and security notes](#known-limitations-and-security-notes)
 - [More documentation](#more-documentation)
@@ -133,7 +134,14 @@ This is the recommended way to run TechStore. Nothing but Docker is needed.
 
 ### First-time setup
 
-From the repository root:
+Get the code first (see [Working with Git and GitHub](#working-with-git-and-github)):
+
+```bash
+git clone https://github.com/srinashg/inventory-tracking-system.git
+cd inventory-tracking-system
+```
+
+Then, from the repository root:
 
 ```bash
 cp .env.example .env
@@ -396,6 +404,64 @@ bash tests/containers/backup-restore.sh # backup and restore, in place and into 
 ```
 
 Each prints `passed: N   failed: M` and exits non-zero on failure.
+
+---
+
+## Working with Git and GitHub
+
+The code is in the public repository https://github.com/srinashg/inventory-tracking-system. The default branch is `main`.
+
+### Get the code and configure it
+
+```bash
+git clone https://github.com/srinashg/inventory-tracking-system.git
+cd inventory-tracking-system
+cp .env.example .env
+```
+
+Then fill in `.env` and start the application by following the [Quick start](#quick-start-with-docker-compose) (or [development without Docker](#running-without-docker-development)); those sections are the single source of setup instructions.
+
+- `.env.example` is a committed **template with blank values**. Never put real values in it.
+- `.env` holds your real secrets, exists only on your computer and is ignored by Git. Check with `git check-ignore -v .env` (it prints the rule that ignores it) and make sure `git status` never lists it.
+- For development without Docker, keep the first Admin's credentials in `dotnet user-secrets` (stored outside the repository), as shown above.
+
+### Everyday commands
+
+```bash
+git status                       # what changed (look for files you did not mean to touch)
+git switch -c feature/short-name # start a branch for your change (never work directly on main)
+git diff                         # review your edits
+git add path/to/file1 path/to/file2   # stage specific files
+git diff --cached                # review exactly what will be committed
+git commit -m "Short, clear summary of the change"
+git push -u origin feature/short-name # first push of the branch (afterwards just: git push)
+git switch main && git pull      # get the latest main
+```
+
+### Contributing changes safely
+
+1. Update `main` (`git switch main && git pull`), then create a **feature branch** from it.
+2. Make a small, focused change. Add or update tests, and update the documentation if behavior changes.
+3. Run the relevant tests from [Running the tests](#running-the-tests) before pushing.
+4. Review `git status` and `git diff --cached`, then commit and push the branch.
+5. Open a **pull request** into `main` on GitHub (or with `gh pr create`), describe what and why, and ask for a review. Do not push straight to `main`.
+6. If you are not a collaborator on the repository, fork it first, push your branch to your fork and open the pull request from there.
+
+### Not committing secrets, generated files or local settings
+
+`.gitignore` already excludes `.env` files, key and certificate files, ASP.NET Core Data Protection keys, database backups (`*.dump`), build output (`bin/`, `obj/`, `node_modules/`, `dist/`), test output (`test-results/`, `playwright-report/`; these can hold saved login sessions) and per-machine files (`.DS_Store`, `.claude/settings.local.json`). Habits that keep it that way:
+
+- Stage files by name, not with a blind `git add -A`, and read `git diff --cached` before every commit.
+- Keep secrets in `.env`, environment variables or `dotnet user-secrets`, never in code, tests, `compose.yaml` or the docs. Tests generate random passwords instead of using real ones.
+- Scan before you push. This runs the open-source scanner Gitleaks from its official image over the working folder (it needs Docker and prints no secret values):
+
+  ```bash
+  docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:latest dir /repo --redact
+  ```
+
+  Use `... git /repo --redact` instead to scan the commit history.
+- **If a secret was committed:** treat it as exposed. Change (rotate) the password or key first. If the commit has **not** been pushed, undo it with `git reset --soft HEAD~1`, remove the secret, and commit again. If it **has** been pushed to this public repository, rotating the secret is the real fix: deleting the file in a later commit does not remove it from history.
+- Do not add a database backup, a `.env` file or anything from `test-results/` to a commit, even temporarily.
 
 ---
 
