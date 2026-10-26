@@ -1,0 +1,6 @@
+-- psql wrapper used by the "migrate" container: hands the application role's password to app-role.sql through a session
+-- setting read from the environment (so it never appears on a command line or in a file), then runs it.
+\set app_password `printenv TECHSTORE_APP_DB_PASSWORD`
+SELECT set_config('techstore.app_password', :'app_password', false) \gset
+\unset app_password
+\i /migrate/app-role.sql

@@ -1,0 +1,266 @@
+// TechStore database schema (PostgreSQL)
+// Source of truth for the EF Core entities and migrations created in Step 4.
+// View it by pasting this file into https://dbdiagram.io
+//
+// Conventions
+//   - Surrogate primary keys are bigint identity columns.
+//   - Money is numeric(12,2). Timestamps are timestamptz (UTC).
+//   - Tables and columns use snake_case; the table for the Order entity is "orders"
+//     because ORDER is a reserved SQL word.
+//   - Transaction boundaries and concurrency strategy are in docs/services.md.
+
+Project techstore {
+  database_type: 'PostgreSQL'
+  Note: 'Inventory & Order Management for an electronics retailer'
+}
+
+// ---------------------------------------------------------------------------
+// Catalog and reference data
+// ---------------------------------------------------------------------------
+
+Table products {
+  product_id bigint [pk, increment]
+  sku        varchar(50)    [not null, unique, note: 'Business identifier; unique across all products']
+  name       varchar(255)   [not null]
+  price      numeric(12,2)  [not null, note: 'Current list price. Orders copy it into order_items.unit_price']
+  is_active  boolean        [not null, default: true, note: 'false = deactivated; kept for history, cannot be ordered']
+
+  checks {
+    `price >= 0` [name: 'ck_products_price_nonnegative']
+  }
+
+  Note: 'Sellable items. 1 product : N inventory_balances, N order_items, N inventory_movements'
+}
+
+Table warehouses {
+  warehouse_id bigint [pk, increment]
+  name         varchar(255) [not null]
+  location     varchar(255) [not null]
+
+  Note: 'Physical stock locations. 1 warehouse : N inventory_balances, N orders, N inventory_movements'
+}
+
+Table customers {
+  customer_id bigint [pk, increment]
+  name        varchar(255) [not null]
+  email       varchar(255) [not null]
+
+  Note: 'Who an order is for (sample data in v1). 1 customer : N orders'
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+
+Table inventory_balances {
+  product_id   bigint [not null]
+  warehouse_id bigint [not null]
+  on_hand      int    [not null, default: 0, note: 'Physically in the warehouse']
+  reserved     int    [not null, default: 0, note: 'Promised to submitted orders. available = on_hand - reserved (calculated, not stored)']
+
+  indexes {
+    (product_id, warehouse_id) [pk, name: 'pk_inventory_balances', note: 'Composite key: exactly one balance per product-warehouse pair']
+    warehouse_id [name: 'ix_inventory_balances_warehouse_id', note: 'Inventory view lists a whole warehouse']
+  }
+
+  checks {
+    `on_hand >= 0`           [name: 'ck_inventory_balances_on_hand_nonnegative']
+    `reserved >= 0`          [name: 'ck_inventory_balances_reserved_nonnegative']
+    `reserved <= on_hand`    [name: 'ck_inventory_balances_reserved_within_on_hand'] // available can never be negative
+  }
+
+  Note: 'Live stock counts. Resolves the N:N relationship between products and warehouses.'
+}
+
+Table inventory_movements {
+  movement_id     bigint [pk, increment]
+  product_id      bigint [not null]
+  warehouse_id    bigint [not null]
+  order_id        bigint [null, note: 'Set for Reservation, Release and Shipment; null for Receipt and Adjustment']
+  quantity_change int    [not null, note: 'Signed change to the quantity the type affects: on_hand for Receipt/Adjustment/Shipment, reserved for Reservation/Release']
+  type            varchar(30)  [not null, note: 'Receipt | Adjustment | Reservation | Release | Shipment']
+  reason          varchar(255) [null, note: 'Required for Adjustment']
+  created_at      timestamptz  [not null, default: `now()`]
+
+  indexes {
+    (product_id, warehouse_id, created_at) [name: 'ix_inventory_movements_product_warehouse_created']
+    order_id [name: 'ix_inventory_movements_order_id']
+    warehouse_id [name: 'ix_inventory_movements_warehouse_id']
+  }
+
+  checks {
+    `quantity_change <> 0` [name: 'ck_inventory_movements_change_nonzero']
+    `type IN ('Receipt','Adjustment','Reservation','Release','Shipment')` [name: 'ck_inventory_movements_type']
+    `type <> 'Adjustment' OR (reason IS NOT NULL AND length(trim(reason)) > 0)` [name: 'ck_inventory_movements_adjustment_has_reason']
+    `type <> 'Receipt' OR quantity_change > 0`  [name: 'ck_inventory_movements_receipt_positive']
+    `type <> 'Reservation' OR quantity_change > 0`  [name: 'ck_inventory_movements_reservation_positive']
+    `type NOT IN ('Release','Shipment') OR quantity_change < 0` [name: 'ck_inventory_movements_release_shipment_negative']
+  }
+
+  Note: 'Append-only audit trail. Rows are inserted, never updated or deleted, in the same transaction as the balance change they record.'
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+Table orders {
+  order_id     bigint [pk, increment]
+  customer_id  bigint [not null]
+  warehouse_id bigint [not null]
+  status       varchar(20) [not null, default: 'Draft', note: 'Draft | Reserved | Picking | Packed | Shipped | Canceled']
+  created_at   timestamptz [not null, default: `now()`]
+
+  indexes {
+    customer_id [name: 'ix_orders_customer_id']
+    warehouse_id [name: 'ix_orders_warehouse_id']
+    status [name: 'ix_orders_status', note: 'Dashboard counts open and shipped orders']
+  }
+
+  checks {
+    `status IN ('Draft','Reserved','Picking','Packed','Shipped','Canceled')` [name: 'ck_orders_status']
+  }
+
+  Note: 'EF entity: Order. Allowed status transitions are enforced by the service layer (see docs/architecture.md section 2).'
+}
+
+Table order_items {
+  order_item_id bigint [pk, increment]
+  order_id      bigint [not null]
+  product_id    bigint [not null]
+  quantity      int    [not null]
+  unit_price    numeric(12,2) [not null, note: 'Product price copied at order creation; later price changes do not affect it']
+
+  indexes {
+    (order_id, product_id) [unique, name: 'ux_order_items_order_product', note: 'A product appears at most once per order']
+    product_id [name: 'ix_order_items_product_id']
+  }
+
+  checks {
+    `quantity > 0`    [name: 'ck_order_items_quantity_positive']
+    `unit_price >= 0` [name: 'ck_order_items_unit_price_nonnegative']
+  }
+
+  Note: 'Resolves the N:N relationship between orders and products.'
+}
+
+// ---------------------------------------------------------------------------
+// Relationships (foreign keys). All use ON DELETE RESTRICT: nothing in this
+// system is deleted; products are deactivated and orders are canceled.
+// ---------------------------------------------------------------------------
+
+// 1 customer : N orders
+Ref fk_orders_customer: orders.customer_id > customers.customer_id [delete: restrict]
+
+// 1 warehouse : N orders (each order is fulfilled from exactly one warehouse)
+Ref fk_orders_warehouse: orders.warehouse_id > warehouses.warehouse_id [delete: restrict]
+
+// 1 order : N order_items
+Ref fk_order_items_order: order_items.order_id > orders.order_id [delete: restrict]
+
+// 1 product : N order_items
+Ref fk_order_items_product: order_items.product_id > products.product_id [delete: restrict]
+
+// products N : N warehouses, resolved by inventory_balances
+Ref fk_inventory_balances_product: inventory_balances.product_id > products.product_id [delete: restrict]
+Ref fk_inventory_balances_warehouse: inventory_balances.warehouse_id > warehouses.warehouse_id [delete: restrict]
+
+// 1 product : N movements, 1 warehouse : N movements, 1 order : N movements (optional)
+Ref fk_inventory_movements_product: inventory_movements.product_id > products.product_id [delete: restrict]
+Ref fk_inventory_movements_warehouse: inventory_movements.warehouse_id > warehouses.warehouse_id [delete: restrict]
+Ref fk_inventory_movements_order: inventory_movements.order_id > orders.order_id [delete: restrict]
+
+// ---------------------------------------------------------------------------
+// Authentication (Step 10): ASP.NET Core Identity tables, renamed to snake_case.
+// Users sign in with their email. Passwords are stored only as salted hashes.
+// ---------------------------------------------------------------------------
+
+Table users {
+  id                      bigint [pk, increment]
+  user_name               varchar(256) [null]
+  normalized_user_name    varchar(256) [null, unique, note: 'Upper-cased user_name, used for look-ups']
+  email                   varchar(256) [null]
+  normalized_email        varchar(256) [null, note: 'Upper-cased email; unique so one account per address']
+  email_confirmed         boolean      [not null]
+  password_hash           text         [null, note: 'Salted PBKDF2 hash. Never the password itself.']
+  security_stamp          text         [null, note: 'Changes when the password, role or lock state changes; ends existing sessions']
+  concurrency_stamp       text         [null]
+  phone_number            text         [null]
+  phone_number_confirmed  boolean      [not null]
+  two_factor_enabled      boolean      [not null]
+  lockout_end             timestamptz  [null, note: 'Account is locked until this time']
+  lockout_enabled         boolean      [not null]
+  access_failed_count     int          [not null, note: '5 consecutive failures lock the account']
+  display_name            varchar(255) [not null, default: '']
+
+  indexes {
+    normalized_email [unique, name: 'ux_users_normalized_email']
+  }
+
+  Note: 'EF entity: AppUser. Employees who can sign in.'
+}
+
+Table roles {
+  id                bigint [pk, increment]
+  name              varchar(256) [null]
+  normalized_name   varchar(256) [null, unique]
+  concurrency_stamp text [null]
+
+  Note: 'EF entity: AppRole. Admin, Sales, Warehouse.'
+}
+
+Table user_roles {
+  user_id bigint [not null]
+  role_id bigint [not null]
+
+  indexes {
+    (user_id, role_id) [pk]
+  }
+
+  Note: 'N:N between users and roles (each employee has one role in v1).'
+}
+
+// Standard Identity tables that this application leaves empty.
+Table user_claims {
+  id          int [pk, increment]
+  user_id     bigint [not null]
+  claim_type  text [null]
+  claim_value text [null]
+}
+
+Table user_logins {
+  login_provider        text   [not null]
+  provider_key          text   [not null]
+  provider_display_name text   [null]
+  user_id               bigint [not null]
+
+  indexes {
+    (login_provider, provider_key) [pk]
+  }
+}
+
+Table user_tokens {
+  user_id        bigint [not null]
+  login_provider text   [not null]
+  name           text   [not null]
+  value          text   [null]
+
+  indexes {
+    (user_id, login_provider, name) [pk]
+  }
+}
+
+Table role_claims {
+  id          int [pk, increment]
+  role_id     bigint [not null]
+  claim_type  text [null]
+  claim_value text [null]
+}
+
+Ref fk_user_roles_user: user_roles.user_id > users.id [delete: cascade]
+Ref fk_user_roles_role: user_roles.role_id > roles.id [delete: cascade]
+Ref fk_user_claims_user: user_claims.user_id > users.id [delete: cascade]
+Ref fk_user_logins_user: user_logins.user_id > users.id [delete: cascade]
+Ref fk_user_tokens_user: user_tokens.user_id > users.id [delete: cascade]
+Ref fk_role_claims_role: role_claims.role_id > roles.id [delete: cascade]
+

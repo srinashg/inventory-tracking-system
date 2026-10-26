@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\services\TechStore.Services.csproj" />
+    <ProjectReference Include="..\dto\TechStore.Dto.csproj" />
+    <ProjectReference Include="..\database\TechStore.Database.csproj" />
+    <ProjectReference Include="..\auth\TechStore.Auth.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>f2bc8146-0562-42d3-8723-35f790a23e97</UserSecretsId>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,49 @@
+# The web container: serves the React build and forwards /api and /health to the ASP.NET Core API.
+# The browser only ever talks to this server (one origin), so cookies work as designed and no CORS setup is needed.
+# ${API_UPSTREAM} and ${DNS_RESOLVER} are filled in from environment variables when the container starts.
+
+server {
+    listen 8080;
+    server_name _;
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+
+    # Resolve the API's name again every few seconds, so the web container survives the API container being recreated.
+    resolver ${DNS_RESOLVER} valid=10s ipv6=off;
+    set $api_upstream ${API_UPSTREAM};
+
+    # Answers by itself (does not ask the API): "is this web server running?"
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # The API. It sends its own security and cache headers, so none are added here.
+    location /api/ {
+        include /etc/nginx/proxy.conf;
+        proxy_pass http://$api_upstream;
+    }
+
+    location = /health {
+        include /etc/nginx/proxy.conf;
+        proxy_pass http://$api_upstream;
+    }
+
+    # Built files have content hashes in their names, so they can be cached for a year.
+    location /assets/ {
+        include /etc/nginx/security-headers.conf;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        gzip on;
+        gzip_types text/css application/javascript image/svg+xml;
+        try_files $uri =404;
+    }
+
+    # Every other URL (/login, /orders, ...) is a React route: send index.html and let the router decide. A refresh works.
+    location / {
+        include /etc/nginx/security-headers.conf;
+        add_header Cache-Control "no-cache" always;
+        try_files $uri /index.html;
+    }
+}

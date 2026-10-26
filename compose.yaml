@@ -1,0 +1,114 @@
+# TechStore, local stack: PostgreSQL + one-shot migration + ASP.NET Core API + nginx web server.
+#   cp .env.example .env   (fill in the passwords; see README)   then   docker compose up --build -d
+# Open http://localhost:8080. Only the web server is reachable from outside the Docker network, and only from this computer.
+#
+# This file is for LOCAL use. Its cookie setting below allows plain http because the site is bound to 127.0.0.1 only; a real
+# deployment must serve https and must not use the two Auth__*Cookie* settings (the API refuses to start without them).
+
+name: techstore
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-techstore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-techstore}
+    volumes:
+      - pgdata:/var/lib/postgresql/data # the database survives restarts and "docker compose down"; only "down -v" deletes it
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+
+  # Runs once as the database owner: applies any migrations that are missing, then creates/refreshes the limited role the API
+  # uses, then exits. Safe to run again: it only adds what is not there yet and never touches data.
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-techstore}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
+      PGDATABASE: ${POSTGRES_DB:-techstore}
+      # Used only to create or refresh the limited "techstore_app" role the API connects with (see backend/database/Provisioning).
+      TECHSTORE_APP_DB_PASSWORD: ${TECHSTORE_APP_DB_PASSWORD:?Set TECHSTORE_APP_DB_PASSWORD in .env (see .env.example)}
+    restart: "no"
+    networks: [backend]
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # The API connects as the limited "techstore_app" role: it can read and write rows but cannot change the schema.
+      ConnectionStrings__TechStore: Host=db;Database=${POSTGRES_DB:-techstore};Username=techstore_app;Password=${TECHSTORE_APP_DB_PASSWORD:?Set TECHSTORE_APP_DB_PASSWORD in .env (see .env.example)}
+      # The first Admin. Needed only on the very first start; once an Admin exists these are ignored (and a warning asks you
+      # to remove them). Empty values are fine after that.
+      Auth__InitialAdmin__Email: ${TECHSTORE_ADMIN_EMAIL:-}
+      Auth__InitialAdmin__Password: ${TECHSTORE_ADMIN_PASSWORD:-}
+      Auth__InitialAdmin__DisplayName: ${TECHSTORE_ADMIN_NAME:-Administrator}
+      # LOCAL ONLY: the cookie may travel over plain http because the site is bound to 127.0.0.1 (see the web service).
+      Auth__RequireSecureCookie: "false"
+      Auth__AllowInsecureCookiesForLocalHttp: "true"
+      # Believe X-Forwarded-For from exactly one address: the web container (it has a fixed address, see networks below).
+      Auth__TrustedProxies__0: ${TECHSTORE_WEB_IP:-172.28.0.10}
+    volumes:
+      - keys:/keys # cookie and CSRF key ring, so logins survive a restart (DataProtection__KeysPath=/keys in the image)
+    healthcheck:
+      # The runtime image has no curl; bash can open a TCP connection and send a minimal request.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [backend]
+
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_UPSTREAM: api:8080
+    ports:
+      - "127.0.0.1:${TECHSTORE_WEB_PORT:-8080}:8080" # 127.0.0.1: reachable from this computer only
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks:
+      backend:
+        ipv4_address: ${TECHSTORE_WEB_IP:-172.28.0.10}
+
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: ${TECHSTORE_SUBNET:-172.28.0.0/24}
+
+volumes:
+  pgdata:
+  keys:

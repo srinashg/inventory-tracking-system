@@ -1,0 +1,20 @@
+{
+  "database": "techstore_e2e",
+  "pgHost": "localhost",
+  "pgPort": "5432",
+  "pgUser": "postgres",
+  "apiPort": 5290,
+  "webPort": 5273,
+  "strictApiPort": 5291,
+  "strictWebPort": 5274,
+  "accounts": [
+    { "key": "admin", "email": "admin@e2e.test", "role": "Admin" },
+    { "key": "sales", "email": "sales@e2e.test", "role": "Sales" },
+    { "key": "warehouse", "email": "warehouse@e2e.test", "role": "Warehouse" },
+    { "key": "logout", "email": "logout.sales@e2e.test", "role": "Sales" },
+    { "key": "revoke", "email": "revoke.warehouse@e2e.test", "role": "Warehouse" },
+    { "key": "lockout", "email": "lockout.sales@e2e.test", "role": "Sales" },
+    { "key": "expiry", "email": "expiry.sales@e2e.test", "role": "Sales" },
+    { "key": "ratelimit", "email": "ratelimit.sales@e2e.test", "role": "Sales" }
+  ]
+}

@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------------------------------------------------
+# Secrets and local settings: never committed.
+# ---------------------------------------------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+secrets.json
+*.pem
+*.pfx
+*.p12
+*.key
+# ASP.NET Core Data Protection key ring (signs and encrypts login cookies) and user-secrets.
+key-*.xml
+DataProtection-Keys/
+keys/
+usersecrets/
+.microsoft/
+# Database backups contain every record, employee accounts and password hashes.
+*.dump
+*backup*.sql
+techstore-backup*
+# The project blueprint is kept locally only (not published with the repository).
+DotNET_Project_Blueprint_Revised.docx
+# Claude Code's per-machine settings (they hold local paths and permission prompts you approved).
+.claude/settings.local.json
+.claude/worktrees/
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Build output and dependencies
+# ---------------------------------------------------------------------------------------------------------------------
+# .NET
+**/bin/
+**/obj/
+TestResults/
+*.trx
+coverage/
+coverage.*.xml
+*.coverage
+*.user
+*.suo
+.vs/
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Test output. test-results/ holds saved browser sessions (cookies) and traces: never commit it.
+# ---------------------------------------------------------------------------------------------------------------------
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Logs, editors, operating system
+# ---------------------------------------------------------------------------------------------------------------------
+*.log
+npm-debug.log*
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.orig
+*.bak

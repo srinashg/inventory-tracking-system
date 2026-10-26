@@ -1,0 +1,16 @@
+# Keep the build context small and keep secrets and build output out of every image.
+**/bin
+**/obj
+**/node_modules
+**/dist
+**/test-results
+**/playwright-report
+.git
+.claude
+.env
+.env.*
+!.env.example
+tests
+docs
+*.docx
+**/.DS_Store

@@ -1,0 +1,21 @@
+# Let Git normalize text files to LF in the repository (and use the platform's line endings in a working copy).
+* text=auto
+
+# Files that run on Linux (inside containers or with bash) must ALWAYS be LF, even when checked out on Windows,
+# or they fail with errors such as "/bin/bash^M: bad interpreter" or "env: 'sh\r': No such file".
+*.sh              text eol=lf
+Dockerfile        text eol=lf
+*.dockerfile      text eol=lf
+.dockerignore     text eol=lf
+compose.yaml      text eol=lf
+.env.example      text eol=lf
+*.conf            text eol=lf
+*.template        text eol=lf
+*.sql             text eol=lf
+*.psql            text eol=lf
+
+# Binary files: never convert or diff as text.
+*.docx            binary
+*.png             binary
+*.jpg             binary
+*.ico             binary

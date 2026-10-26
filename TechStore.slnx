@@ -1,0 +1,23 @@
+<Solution>
+  <Folder Name="/backend/" />
+  <Folder Name="/backend/auth/">
+    <Project Path="backend/auth/TechStore.Auth.csproj" />
+  </Folder>
+  <Folder Name="/backend/controllers/">
+    <Project Path="backend/controllers/TechStore.Api.csproj" />
+  </Folder>
+  <Folder Name="/backend/database/">
+    <Project Path="backend/database/TechStore.Database.csproj" />
+  </Folder>
+  <Folder Name="/backend/dto/">
+    <Project Path="backend/dto/TechStore.Dto.csproj" />
+  </Folder>
+  <Folder Name="/backend/services/">
+    <Project Path="backend/services/TechStore.Services.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TechStore.Api.Tests/TechStore.Api.Tests.csproj" />
+    <Project Path="tests/TechStore.Auth.Tests/TechStore.Auth.Tests.csproj" />
+    <Project Path="tests/TechStore.Services.Tests/TechStore.Services.Tests.csproj" />
+  </Folder>
+</Solution>
