@@ -4,8 +4,9 @@
 #   frontend  installs the npm packages, lints, type-checks and builds the React app, and runs the Vitest suite
 #   browser   runs the Playwright suite against the real API and a throw-away PostgreSQL (login, roles, workflow, sessions)
 #   containers  runs the Docker Compose container suites that matter for the change (container-tests.yml)
+#   secrets   Gitleaks scan of the Git history (always runs)
+#   dependencies  known-vulnerability audit of the NuGet and npm packages: High/Critical fail, Moderate/Low are reported (always runs)
 #   ci-gate   the ONE check to require before merging: it fails unless every check that had to run succeeded
-# Later steps add more jobs (security) and list them in the gate.
 name: CI
 
 on:
@@ -40,6 +41,8 @@ jobs:
       browser: ${{ steps.filter.outputs.browser }}
       containers: ${{ steps.filter.outputs.containers }}
       container_suites: ${{ steps.filter.outputs.container_suites }}
+      secrets: ${{ steps.filter.outputs.secrets }}
+      dependencies: ${{ steps.filter.outputs.dependencies }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,6 +57,9 @@ jobs:
         run: |
           set -u
           emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+
+          # The security checks are never skipped, not even for documentation-only changes.
+          emit secrets true; emit dependencies true
 
           # Anything that is not a pull request (a push to main, a manual run) runs everything.
           if [ "$EVENT" != "pull_request" ]; then
@@ -360,11 +366,176 @@ jobs:
     with:
       suites: ${{ needs.changes.outputs.container_suites }}
 
+  # Secret scan of the whole Git history (including the pull request's commits). Always required: a leaked secret is never
+  # "unrelated" to a change. --redact keeps the matched value out of the log; no report file is written or uploaded.
+  secrets:
+    name: Secret scan (Gitleaks)
+    needs: changes
+    if: needs.changes.outputs.secrets == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The official image, pinned by digest (v8.30.1), run as the runner's own user with the checkout mounted read-only.
+      # Default rules; there is no allow-list. The JSON report stays on the runner (never uploaded); only the rule, file, line
+      # and short commit id of each finding are printed, never the matched text.
+      - name: Scan the Git history for secrets
+        run: |
+          mkdir -p "$RUNNER_TEMP/gitleaks" && chmod 777 "$RUNNER_TEMP/gitleaks"
+          status=0
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+            -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/gitleaks:/out" \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git /repo --redact --no-banner --no-color --exit-code 1 --report-format json --report-path /out/report.json \
+            > "$RUNNER_TEMP/gitleaks/log.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/gitleaks/log.txt"
+
+          # Gitleaks has been seen to log an error and still exit 0, so "passed" needs positive proof that it scanned commits
+          # and found nothing - not just an exit code.
+          if [ "$status" -eq 0 ] && grep -qE '[1-9][0-9]* commits scanned' "$RUNNER_TEMP/gitleaks/log.txt" \
+              && grep -q 'no leaks found' "$RUNNER_TEMP/gitleaks/log.txt" && ! grep -q ' ERR ' "$RUNNER_TEMP/gitleaks/log.txt"; then
+            echo "Secret scan: passed"
+            exit 0
+          fi
+
+          echo "::error::Secret scan failed (exit code $status). Findings (values withheld):"
+          python3 - <<'PY'
+          import json, os
+          try:
+              findings = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "gitleaks", "report.json"), encoding="utf-8"))
+          except (OSError, ValueError):
+              findings = []
+          for f in findings:
+              print(f"::error file={f.get('File', '?')},line={f.get('StartLine', 1)},title=Possible secret ({f.get('RuleID', '?')})::commit {str(f.get('Commit', '?'))[:8]}")
+          if not findings:
+              print("No findings were reported: the scan itself did not complete. See the log above.")
+          PY
+          exit 1
+
+  # Known-vulnerability audit of the NuGet and npm packages. High and Critical advisories fail the job; Moderate and Low are
+  # listed in the run summary (and as warnings) without failing it. Always required: new advisories appear without any code
+  # change, so a red result here can be caused by the advisory database, not by the pull request (see the README).
+  dependencies:
+    name: Dependency audit (NuGet and npm)
+    needs: changes
+    if: needs.changes.outputs.dependencies == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # Each audit is its own step so one failure does not hide the other. The scripts fail when the audit itself could not run
+      # (no network, unreadable report): "could not check" is never treated as "nothing found".
+      - name: Audit NuGet packages (direct and transitive)
+        id: nuget
+        run: |
+          dotnet restore TechStore.slnx
+          dotnet list TechStore.slnx package --vulnerable --include-transitive --format json > "$RUNNER_TEMP/nuget-audit.json"
+          python3 - <<'PY'
+          import json, os, sys
+
+          data = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "nuget-audit.json"), encoding="utf-8"))
+          failures = []
+          if data.get("problems"):
+              failures += [f"the audit reported a problem: {p.get('text', p)}" for p in data["problems"]]
+          if not data.get("projects"):
+              failures.append("the audit listed no projects")
+
+          # (package, version, severity, advisory url) - one row per package/advisory, however many projects use it
+          found = set()
+          for project in data.get("projects", []):
+              for framework in project.get("frameworks", []):
+                  for package in framework.get("topLevelPackages", []) + framework.get("transitivePackages", []):
+                      for vulnerability in package.get("vulnerabilities", []):
+                          found.add((package["id"], package.get("resolvedVersion", "?"),
+                                     vulnerability.get("severity", "Unknown"), vulnerability.get("advisoryurl", "")))
+
+          # Only Low and Moderate are reported without failing; High, Critical and anything unrecognised block.
+          reported_only = {"low", "moderate"}
+          blocking = sorted(row for row in found if row[2].lower() not in reported_only)
+          reported = sorted(row for row in found if row[2].lower() in reported_only)
+
+          lines = ["### NuGet vulnerability audit", ""]
+          if found:
+              lines += ["| Package | Version | Severity | Advisory | Effect |", "|---|---|---|---|---|"]
+              lines += [f"| {p} | {v} | {s} | {u} | {'**blocks**' if (p, v, s, u) in blocking else 'reported'} |" for p, v, s, u in sorted(found)]
+          else:
+              lines.append("No known vulnerabilities.")
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(lines) + "\n\n")
+
+          for p, v, s, u in reported:
+              print(f"::warning title=NuGet {s} vulnerability::{p} {v} ({u})")
+          for p, v, s, u in blocking:
+              print(f"::error title=NuGet {s} vulnerability::{p} {v} ({u})")
+          print(f"NuGet audit: {len(blocking)} blocking, {len(reported)} reported, {len(failures)} audit problems")
+          for failure in failures:
+              print(f"::error::{failure}")
+          sys.exit(1 if blocking or failures else 0)
+          PY
+
+      # npm audit reads package-lock.json only (nothing is installed) and checks production and development packages.
+      - name: Audit npm packages
+        if: ${{ !cancelled() }}
+        working-directory: frontend
+        run: |
+          # npm exits 1 when it finds anything; the verdict comes from the report below, not from this exit code.
+          npm audit --package-lock-only --json > "$RUNNER_TEMP/npm-audit.json" || true
+          python3 - <<'PY'
+          import json, os, sys
+
+          try:
+              data = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "npm-audit.json"), encoding="utf-8"))
+          except ValueError:
+              data = {}
+          counts = data.get("metadata", {}).get("vulnerabilities")
+          if data.get("error") or counts is None:
+              print("::error::npm audit did not produce a usable report (registry unreachable?)")
+              sys.exit(1)
+
+          rows = sorted((name, entry.get("severity", "unknown"), entry.get("range", ""), bool(entry.get("fixAvailable")))
+                        for name, entry in data.get("vulnerabilities", {}).items())
+          reported_only = {"info", "low", "moderate"}
+          blocking = [row for row in rows if row[1].lower() not in reported_only]
+
+          lines = ["### npm vulnerability audit", ""]
+          if rows:
+              lines += ["| Package | Severity | Affected versions | Fix available | Effect |", "|---|---|---|---|---|"]
+              lines += [f"| {n} | {s} | {r} | {'yes' if f else 'no'} | {'**blocks**' if (n, s, r, f) in blocking else 'reported'} |" for n, s, r, f in rows]
+          else:
+              lines.append("No known vulnerabilities.")
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(lines) + "\n\n")
+
+          for n, s, r, f in rows:
+              level = "error" if (n, s, r, f) in blocking else "warning"
+              print(f"::{level} title=npm {s} vulnerability::{n} {r}")
+          print(f"npm audit: {len(blocking)} blocking, {len(rows) - len(blocking)} reported; counts by severity: {counts}")
+          sys.exit(1 if blocking else 0)
+          PY
+
   ci-gate:
     name: CI gate
     # Every job above is listed here, and the gate judges every job listed (see below). Add new jobs to this list and give
     # "changes" an output with the same name as the job.
-    needs: [changes, backend, frontend, browser, containers]
+    needs: [changes, backend, frontend, browser, containers, secrets, dependencies]
     # Runs even when a job above failed, was skipped or was cancelled: those are exactly the cases it must judge.
     if: always()
     runs-on: ubuntu-24.04
@@ -382,7 +553,7 @@ jobs:
 
           # The jobs that must exist in "needs" above. If someone removes one from the list, the gate fails instead of
           # silently ignoring it.
-          CORE_JOBS = {"backend", "frontend", "browser", "containers"}
+          CORE_JOBS = {"backend", "frontend", "browser", "containers", "secrets", "dependencies"}
           for job in sorted(CORE_JOBS - needs.keys()):
               problems.append(f"'{job}' is missing from the gate's needs list")
 
