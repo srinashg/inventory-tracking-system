@@ -39,7 +39,6 @@ for _ in $(seq 30); do curl -sf localhost:$PORT/healthz >/dev/null && break; sle
 U=localhost:$PORT
 
 echo "== the web server itself"
-check "ci verification: this check is supposed to fail" "yes" "no"
 check "/healthz answers without asking the API" "$(curl -s -o /dev/null -w '%{http_code}' $U/healthz)" 200
 check "runs as a non-root user" "$([ "$(docker exec $WEB id -u)" != 0 ] && echo yes)" yes
 check "does not announce its version" "$(curl -sI $U/ | grep -i '^server:' | tr -d '\r')" "Server: nginx"
