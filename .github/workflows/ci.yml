@@ -197,9 +197,10 @@ jobs:
         run: npm ci
 
       # Lint, build and tests are separate steps so one failure does not hide the others; any failing step fails the job.
+      # --deny-warnings makes a lint warning fail the check (the code base has none today), so warnings cannot pile up unnoticed.
       - name: Lint
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: npm run lint
+        run: npm run lint -- --deny-warnings
 
       - name: Type-check and build
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
