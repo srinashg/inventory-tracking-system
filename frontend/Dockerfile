@@ -8,7 +8,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM nginxinc/nginx-unprivileged:1.28-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 # Where the API lives on the Docker network, and which DNS server resolves it (Docker's built-in one). Not secrets.
 ENV API_UPSTREAM=api:8080 \
     DNS_RESOLVER=127.0.0.11
