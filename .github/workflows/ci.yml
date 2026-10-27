@@ -1,0 +1,209 @@
+# Continuous integration for TechStore. Nothing here deploys anything or uses a secret.
+#   changes   decides which checks a pull request needs (documentation-only changes skip the expensive ones)
+#   backend   builds the .NET solution and runs the xUnit suites against a throw-away PostgreSQL
+#   ci-gate   the ONE check to require before merging: it fails unless every check that had to run succeeded
+# Later steps add more jobs (frontend, browser tests, security, containers) and list them in the gate.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only token for every job unless a job asks for more (none does).
+permissions:
+  contents: read
+
+# A newer push to the same pull request replaces the older run; runs on main are never cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2 # enough to compare a pull request's merge commit with the branch it merges into
+          persist-credentials: false
+
+      - name: Decide which checks are needed
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -u
+          # Anything that is not a pull request (a push to main, a manual run) runs everything.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "Event '$EVENT': running everything."
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The pull request's merge commit has the target branch as its first parent.
+          if ! files=$(git diff --name-only HEAD^1 HEAD); then
+            echo "Could not compare with the target branch: running everything to be safe."
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed files:"
+          while IFS= read -r file; do echo "  $file"; done <<< "$files"
+
+          # Files that can change what the backend does or how it is built and tested.
+          if echo "$files" | grep -qE '^(backend/|tests/TechStore\.|TechStore\.slnx$|global\.json$|Directory\.(Build|Packages)\.|[Nn]u[Gg]et\.[Cc]onfig$|\.github/workflows/ci\.yml$)'; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "Backend checks: required."
+          else
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+            echo "Backend checks: not needed for this change."
+          fi
+
+  backend:
+    name: Backend build and tests
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # A disposable PostgreSQL that exists only for this job. "trust" authentication matches the local default the tests expect
+    # (user postgres, no password), so no credential exists anywhere; the server is reachable only from this runner.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore dependencies
+        run: dotnet restore TechStore.slnx
+
+      - name: Build
+        id: build
+        run: dotnet build TechStore.slnx --no-restore
+
+      # The three suites run as separate steps so one failure does not hide the others; any failing step fails the job.
+      - name: Test - business services
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: dotnet test tests/TechStore.Services.Tests --no-build --logger "trx;LogFileName=services.trx" --results-directory test-results
+
+      - name: Test - authentication and sessions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: dotnet test tests/TechStore.Auth.Tests --no-build --logger "trx;LogFileName=auth.trx" --results-directory test-results
+
+      - name: Test - HTTP API and database privileges
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: dotnet test tests/TechStore.Api.Tests --no-build --logger "trx;LogFileName=api.trx" --results-directory test-results
+
+      - name: Summarize test results
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import glob, os, re
+          rows = []
+          for path in sorted(glob.glob("test-results/*.trx")):
+              text = open(path, encoding="utf-8").read()
+              counters = re.search(r'<Counters ([^>]*)/>', text)
+              values = dict(re.findall(r'(\w+)="(\d+)"', counters.group(1))) if counters else {}
+              rows.append((os.path.basename(path), values.get("total", "?"), values.get("passed", "?"), values.get("failed", "?")))
+          lines = ["### Backend test results", "", "| Suite | Total | Passed | Failed |", "|---|---|---|---|"]
+          lines += [f"| {name} | {total} | {passed} | {failed} |" for name, total, passed, failed in rows] or ["| (no results were produced) | | | |"]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          PY
+
+      # Test result files hold test names and failure messages only (the tests never print passwords), kept briefly.
+      - name: Upload test results (failures only)
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-test-results
+          path: test-results/*.trx
+          retention-days: 7
+          if-no-files-found: ignore
+
+  ci-gate:
+    name: CI gate
+    needs: [changes, backend]
+    # Runs even when a job above failed, was skipped or was cancelled: those are exactly the cases it must judge.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate the results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          problems = []
+
+          def result(job):
+              return needs.get(job, {}).get("result", "missing")
+
+          # The job that decides what must run has to have succeeded; otherwise nothing below can be trusted.
+          if result("changes") != "success":
+              problems.append(f"'changes' did not succeed (result: {result('changes')})")
+          outputs = needs.get("changes", {}).get("outputs", {})
+
+          # The decision must be an explicit "true" or "false". Anything else (missing, garbled) is treated as a failure, never as
+          # "not required", so a broken decision step cannot let a skipped check count as success.
+          for name in ("backend",):
+              if outputs.get(name) not in ("true", "false"):
+                  problems.append(f"the decision for '{name}' is missing or invalid: {outputs.get(name)!r}")
+
+          # job name -> does this change require it? (a skipped job is acceptable ONLY when it was explicitly not required)
+          required = {"backend": outputs.get("backend") == "true"}
+
+          print(f"{'job':<12} {'required':<9} result")
+          for job, must_run in required.items():
+              res = result(job)
+              print(f"{job:<12} {str(must_run):<9} {res}")
+              if must_run and res != "success":
+                  problems.append(f"'{job}' was required but its result is '{res}'")
+              elif not must_run and res not in ("skipped", "success"):
+                  problems.append(f"'{job}' was not required but its result is '{res}'")
+
+          if problems:
+              print("\nCI gate: FAILED")
+              for problem in problems:
+                  print(" -", problem)
+              sys.exit(1)
+          print("\nCI gate: passed")
+          PY
