@@ -16,6 +16,9 @@ ENVFILE=$WORK/test.env
 umask 077
 DBPW=$(openssl rand -hex 24); APPPW=$(openssl rand -hex 24)
 LOGIN_PW="Pw-$(openssl rand -hex 14)"
+# shellcheck source=tests/containers/ci-support.sh
+. tests/containers/ci-support.sh
+ci_mask "$DBPW" "$APPPW" "$LOGIN_PW"
 ADMIN=admin@composee2e.example; SALES=sales@composee2e.example; WAREHOUSE=warehouse@composee2e.example
 cat > "$ENVFILE" <<ENV
 POSTGRES_PASSWORD=$DBPW
@@ -33,7 +36,13 @@ has()  { if printf '%s' "$2" | grep -qi -- "$3"; then ok "$1"; else bad "$1" "[$
 hasnt(){ if printf '%s' "$2" | grep -qi -- "$3"; then bad "$1" "[$3] found"; else ok "$1"; fi; }
 
 dc() { docker compose -p $PROJECT --env-file "$ENVFILE" "$@"; }
-cleanup() { dc down -v >/dev/null 2>&1; rm -rf "$WORK"; }
+cleanup() {
+  local rc=$?
+  if [ -n "${CI_LOG_DIR:-}" ] && { [ "$fail" -gt 0 ] || [ "$rc" -ne 0 ]; }; then
+    dc logs --no-color 2>&1 | ci_save_logs compose-e2e "$DBPW" "$APPPW" "$LOGIN_PW"
+  fi
+  dc down -v >/dev/null 2>&1; rm -rf "$WORK"
+}
 trap cleanup EXIT
 dc down -v >/dev/null 2>&1
 psql_db() { dc exec -T db psql -U techstore -d techstore -tA -c "$1" | tr -d '\r'; }

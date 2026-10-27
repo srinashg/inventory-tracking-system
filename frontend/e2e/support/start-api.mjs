@@ -3,8 +3,8 @@
 //   - the normal instance (port apiPort) with generous sign-in rate limits, so the many logins of a test run are not throttled;
 //   - the strict instance (port strictApiPort) with a 1-minute idle timeout and the DEFAULT rate limits, used only by the
 //     session-expiry and rate-limit tests.
-// Steps: recreate the database (so the test accounts always get this run's random password), apply the EF Core migrations,
-// build once, then run both instances. Playwright starts and stops this script (see playwright.config.ts).
+// Steps: recreate the database (so the test accounts always get this run's random password), build once, apply the EF Core migrations,
+// then run both instances. Playwright starts and stops this script (see playwright.config.ts).
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -45,11 +45,13 @@ psql('postgres', `DROP DATABASE IF EXISTS "${config.database}" WITH (FORCE)`)
 psql('postgres', `CREATE DATABASE "${config.database}"`)
 console.log(`[e2e] created database ${config.database}`)
 
-console.log('[e2e] applying migrations')
-execFileSync(dotnet, ['ef', 'database', 'update'], { cwd: join(repoRoot, 'backend/database'), env: { ...env, TECHSTORE_DB: connection }, stdio: 'inherit' })
-
+// Build first: it also restores the NuGet packages, which `dotnet ef` does not do. (On a fresh checkout, with no obj/ folders yet,
+// `dotnet ef database update` alone fails with NETSDK1004 "Assets file not found".)
 console.log('[e2e] building the API')
 execFileSync(dotnet, ['build', project, '--nologo', '-v', 'q'], { env, stdio: 'inherit' })
+
+console.log('[e2e] applying migrations')
+execFileSync(dotnet, ['ef', 'database', 'update'], { cwd: join(repoRoot, 'backend/database'), env: { ...env, TECHSTORE_DB: connection }, stdio: 'inherit' })
 
 // Test accounts exist only because the environment is "Testing" (the API refuses them anywhere else).
 const accountSettings = Object.fromEntries(

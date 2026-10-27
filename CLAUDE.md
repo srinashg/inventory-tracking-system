@@ -631,3 +631,201 @@ At the end of Step 12:
 Do not implement GitHub Actions, CI/CD workflows, cloud deployment, or unrelated application features during this step.
 
 **Stop after completing Step 12 and request my approval before proceeding to Step 13.**
+
+## 13. GitHub Actions Continuous Integration (CI)
+
+Implement automated continuous integration for TechStore using GitHub Actions.
+
+The goal is to automatically validate code changes before they are merged into `main`, reducing regressions and establishing a reliable development workflow.
+
+CI must validate the existing ASP.NET Core backend, React frontend, PostgreSQL integration, browser-based workflows, and repository security without deploying the application.
+
+Use the existing tests, scripts, project structure, and requirements as the source of truth. Do not duplicate working tests unnecessarily.
+
+**General rules:**
+
+- Follow the existing `CLAUDE.md` approval process.
+- Complete only the approved subsection, report the results, and stop for approval before proceeding.
+- Use feature branches and pull requests rather than pushing directly to `main`.
+- Do not expose secrets in workflows, logs, artifacts, or pull request output.
+- Keep CI isolated from the developer's local database and Docker volumes.
+- Prefer reproducible, maintainable workflows over unnecessary complexity.
+- Do not implement continuous deployment, cloud infrastructure, or unrelated features.
+
+### A. Review Existing Tests and Propose CI Architecture
+
+Before creating workflow files, inspect:
+
+- The `.NET` solution, project files, and existing xUnit suites.
+- Frontend scripts in `package.json`.
+- Vitest and Playwright configuration.
+- Dockerfiles and `compose.yaml`.
+- Existing container test scripts.
+- `.env.example` and test-specific configuration.
+- Repository security settings and GitHub Actions requirements.
+
+Determine:
+
+1. Which checks should execute on every pull request.
+2. Which checks should execute on pushes to `main`.
+3. Which slower integration or Docker tests should run on a schedule or manually.
+4. Required runner environments, dependencies, permissions, and estimated resource usage.
+5. How PostgreSQL and temporary test data will be provisioned and cleaned up.
+6. How existing tests can run without real credentials or paid services.
+7. How required status checks can later be enforced through GitHub branch protection or rulesets.
+
+Propose the workflow structure, job dependencies, triggers, caching strategy, and failure behavior.
+
+**Stop for my approval before creating or modifying any workflow files.**
+
+### B. Backend Build and Unit Tests
+
+Create a GitHub Actions job that:
+
+1. Checks out the repository.
+2. Installs the required .NET SDK version.
+3. Restores NuGet dependencies.
+4. Builds the .NET solution.
+5. Executes the existing xUnit service tests.
+6. Executes authentication and API tests using their required isolated test environments.
+7. Reports failures with useful diagnostic output.
+8. Uploads test results where practical and safe.
+
+Use a temporary PostgreSQL service or other isolated database configuration where required.
+
+Never connect CI to the local development database or a production database.
+
+Use appropriate dependency caching to reduce repeated work.
+
+A failing build or test must cause the job to fail.
+
+### C. Frontend Build, Lint and Unit Tests
+
+Create a GitHub Actions job that:
+
+1. Checks out the repository.
+2. Installs the appropriate Node.js version.
+3. Installs dependencies reproducibly using `npm ci`.
+4. Runs the existing frontend lint checks.
+5. Runs TypeScript compilation and the production build.
+6. Runs the existing Vitest and React Testing Library tests.
+7. Reports test failures clearly.
+
+Reuse the current package scripts and lockfile.
+
+Cache npm dependencies where appropriate.
+
+Do not introduce unnecessary frontend frameworks, testing libraries, or build tools.
+
+### D. Integration and End-to-End Browser Tests
+
+Automate the existing Playwright and container integration tests.
+
+Review the current test suites before choosing how to run them:
+
+- Existing Playwright tests.
+- `tests/containers/web-image.sh`.
+- `tests/containers/compose-stack.sh`.
+- `tests/containers/compose-e2e.sh`.
+- `tests/containers/backup-restore.sh`.
+
+Implement an appropriate balance between fast feedback and comprehensive verification.
+
+Requirements:
+
+1. Run browser tests against an isolated application instance.
+2. Provision PostgreSQL and any required test accounts automatically.
+3. Verify the existing Admin, Sales and Warehouse workflows.
+4. Verify inventory reservation, fulfillment, and insufficient-stock behavior.
+5. Preserve the existing authentication and authorization test coverage.
+6. Ensure containers, test databases, and volumes are disposable.
+7. Collect useful logs or Playwright traces on failure without exposing credentials, sessions, or other sensitive data.
+8. Respect GitHub-hosted runner limits and avoid unnecessary repeated Docker builds.
+
+If some container suites are too expensive for every pull request, propose running them through scheduled or manually triggered workflows.
+
+Do not remove existing test coverage merely to make CI faster.
+
+### E. Automated Security Checks
+
+Add appropriate automated repository security checks.
+
+At minimum, evaluate:
+
+- Gitleaks or an equivalent secret scanner.
+- Vulnerability auditing for NuGet dependencies.
+- Vulnerability auditing for npm dependencies.
+- GitHub Dependabot for supported dependency ecosystems.
+- Minimal GitHub Actions token permissions.
+- Pinned or otherwise appropriately controlled third-party GitHub Actions.
+
+Security checks must not print credentials or sensitive findings into public logs.
+
+Use supported, maintained tools and document any checks that cannot be implemented reliably.
+
+Do not add hard-coded secrets or production credentials to GitHub Actions.
+
+Explain any vulnerabilities found, including whether they require immediate action or are accepted limitations.
+
+### F. Branch Protection and Pull Request Quality Gates
+
+After the CI workflows pass reliably, review the available GitHub repository rulesets and branch protection options.
+
+Propose protection for `main`, including:
+
+1. Requiring pull requests rather than direct pushes.
+2. Requiring successful CI checks before merging.
+3. Preventing accidental force pushes and branch deletion.
+4. Keeping required status check names stable.
+5. Requiring reviews where appropriate for the repository's collaboration model.
+
+Check what GitHub supports for this public repository and its current plan before applying settings.
+
+**Do not enable or change repository protection rules until I explicitly approve the proposed settings.**
+
+Verify that the selected rules do not create an impossible or permanently blocked merge workflow.
+
+### G. Final CI Verification and Documentation
+
+Validate the complete CI process using a dedicated feature branch and pull request.
+
+Verify:
+
+1. A normal pull request triggers the intended workflows.
+2. Backend and frontend tests pass when the code is correct.
+3. Integration and browser tests execute in isolated environments.
+4. A deliberately introduced test failure causes the appropriate workflow to fail.
+5. Correcting the failure restores a passing CI result.
+6. Security checks operate as intended without leaking sensitive data.
+7. The workflows do not require paid cloud hosting or application deployment.
+8. The workflows do not alter developer or production databases.
+
+Use safe, temporary test changes for failure verification and remove them before the final merge.
+
+Update `README.md` and relevant technical documentation to explain:
+
+- What CI checks run automatically.
+- When each workflow is triggered.
+- How to view workflow results.
+- How to reproduce relevant checks locally.
+- How to troubleshoot common CI failures.
+- Which checks are required before a pull request can be merged.
+
+Add a GitHub Actions status badge to the README once the workflow is stable.
+
+### H. Completion and Approval
+
+At the end of Step 13:
+
+- Summarize all GitHub Actions workflows and their responsibilities.
+- Report which automated tests and security checks passed.
+- Provide links to the relevant workflow runs and pull requests.
+- Identify any skipped, deferred, or platform-limited checks.
+- Confirm test isolation and secret handling.
+- Report the final branch protection configuration, if approved and applied.
+- Confirm that existing application functionality was preserved.
+- Verify that `main` is clean and synchronized after any approved merges.
+
+**Stop after completing Step 13 and request my approval before beginning Step 14.**
+
+Do not implement CD pipelines, cloud hosting, production deployment, or unrelated application features as part of Step 13.

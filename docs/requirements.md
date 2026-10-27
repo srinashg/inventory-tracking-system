@@ -182,7 +182,7 @@ How to run it: `README.md`. How it is built: `architecture.md` §8. What is stil
 - Multi-factor authentication and single sign-on (the design leaves room to add an external identity provider later).
 - Microservices, message queues, and AI features.
 - Production hardening of the container deployment (HTTPS termination, encrypted key ring, file-based secrets, automated backups, high availability): see `deployment-security-checklist.md`.
-- CI/CD and cloud hosting (optional later: GitHub Actions CI and an Azure demo).
+- Continuous deployment and cloud hosting (an Azure demo is optional later). GitHub Actions continuous integration is in place: see README.md, "Continuous integration".
 
 ---
 

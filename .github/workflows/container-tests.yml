@@ -1,0 +1,126 @@
+# The Docker Compose container test suites (tests/containers/*.sh). Each suite builds the real images, starts the real stack under
+# its own project name with its own random secrets, tests it, and deletes everything it created.
+#
+# It runs in three ways:
+#   - called by ci.yml on a pull request, with ONLY the suites relevant to the files that changed (Dockerfiles, compose.yaml, nginx,
+#     migrations, provisioning scripts, container tests); the result is part of the required "CI gate"
+#   - called by ci.yml on a push to main: every suite
+#   - on its own, every night and on demand (Actions tab -> Container tests -> Run workflow): every suite, or the one you choose
+name: Container tests
+
+on:
+  workflow_call:
+    inputs:
+      suites:
+        description: 'JSON array of the suites to run, for example ["web-image","compose-stack"]'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Which suite to run
+        type: choice
+        options: [all, web-image, compose-stack, compose-e2e, backup-restore]
+        default: all
+  schedule:
+    - cron: "17 3 * * *" # every night at 03:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      suites: ${{ steps.pick.outputs.suites }}
+    steps:
+      - name: Decide which suites to run
+        id: pick
+        env:
+          REQUESTED: ${{ inputs.suites }} # set when called from ci.yml
+          CHOSEN: ${{ inputs.suite }} # set by a manual run
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          ALL = ["web-image", "compose-stack", "compose-e2e", "backup-restore"]
+          requested = os.environ.get("REQUESTED", "")
+          chosen = os.environ.get("CHOSEN", "")
+
+          if requested:
+              suites = json.loads(requested)
+          elif chosen and chosen != "all":
+              suites = [chosen]
+          else:
+              suites = ALL  # nightly run, or a manual run of "all"
+
+          # Only known suite names may reach the next job (they become part of a command).
+          unknown = [s for s in suites if s not in ALL]
+          if unknown or len(set(suites)) != len(suites):
+              print(f"Invalid suite list: {suites}")
+              sys.exit(1)
+
+          print("Suites to run:", suites)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("suites=" + json.dumps(suites) + "\n")
+          PY
+
+  suite:
+    name: Containers - ${{ matrix.suite }}
+    needs: plan
+    if: needs.plan.outputs.suites != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false # a failing suite must not hide the others
+      matrix:
+        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Where the test script saves (redacted) container logs if the suite fails.
+      - name: Choose a folder for failure logs
+        run: echo "CI_LOG_DIR=$RUNNER_TEMP/container-logs" >> "$GITHUB_ENV"
+
+      # Only the browser-based suite needs Node.js and Chromium (it drives the real stack with Playwright).
+      - name: Install Node.js 22
+        if: matrix.suite == 'compose-e2e'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the Playwright browser
+        if: matrix.suite == 'compose-e2e'
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Show the Docker version
+        run: docker version --format 'client {{.Client.Version}}, server {{.Server.Version}}' && docker compose version
+
+      # The script creates its own random secrets (masked in the log), uses its own Compose project and removes its containers,
+      # networks and volumes when it ends. It never uses a .env file or any real credential.
+      - name: Run the suite
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: bash "tests/containers/${SUITE}.sh"
+
+      # Container logs with the test secrets replaced by [redacted], plus screenshots of failing pages. No traces, sessions or reports.
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-diagnostics-${{ matrix.suite }}
+          path: |
+            ${{ runner.temp }}/container-logs/*.log
+            frontend/test-results/compose/**/*.png
+          retention-days: 3
+          if-no-files-found: ignore

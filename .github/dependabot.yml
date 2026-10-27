@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directories: ["/backend/*", "/tests/*"]   # every .csproj lives one level below these folders
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    groups:
+      nuget-minor-and-patch: { update-types: [minor, patch] }
+    labels: [dependencies]
+    commit-message: { prefix: "deps(nuget)" }
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-and-patch: { update-types: [minor, patch] }
+    labels: [dependencies]
+    commit-message: { prefix: "deps(npm)" }
+
+  - package-ecosystem: github-actions
+    directory: /                              # also covers .github/workflows/*.yml (ci.yml, container-tests.yml)
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    labels: [dependencies]
+    commit-message: { prefix: "deps(actions)" }
+
+  - package-ecosystem: docker
+    directories: ["/backend", "/frontend"]    # backend/Dockerfile and frontend/Dockerfile base images
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    labels: [dependencies]
+    commit-message: { prefix: "deps(docker)" }
+
+  - package-ecosystem: docker-compose
+    directory: /                              # compose.yaml (postgres:17)
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    labels: [dependencies]
+    commit-message: { prefix: "deps(compose)" }

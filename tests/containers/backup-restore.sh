@@ -30,9 +30,23 @@ ENV
 }
 new_env "$WORK/stacka.env" $PORT_A 172.28.0
 new_env "$WORK/stackb.env" $PORT_B 172.29.0
+# shellcheck source=tests/containers/ci-support.sh
+. tests/containers/ci-support.sh
+ci_mask $(grep -hE 'PASSWORD=' "$WORK/stacka.env" "$WORK/stackb.env" | cut -d= -f2-)
 da() { docker compose -p $A --env-file "$WORK/stacka.env" "$@"; }
 db_() { docker compose -p $B --env-file "$WORK/stackb.env" "$@"; }
-cleanup() { da down -v >/dev/null 2>&1; db_ down -v >/dev/null 2>&1; rm -rf "$WORK"; }
+cleanup() {
+  local rc=$?
+  if [ -n "${CI_LOG_DIR:-}" ] && { [ "$fail" -gt 0 ] || [ "$rc" -ne 0 ]; }; then
+    local secrets=()
+    local file
+    for file in "$WORK/stacka.env" "$WORK/stackb.env"; do
+      [ -f "$file" ] && while IFS= read -r line; do secrets+=("$line"); done < <(grep -E '(PASSWORD)=' "$file" | cut -d= -f2-)
+    done
+    { da logs --no-color 2>&1; db_ logs --no-color 2>&1; } | ci_save_logs backup-restore "${secrets[@]}"
+  fi
+  da down -v >/dev/null 2>&1; db_ down -v >/dev/null 2>&1; rm -rf "$WORK"
+}
 trap cleanup EXIT
 da down -v >/dev/null 2>&1; db_ down -v >/dev/null 2>&1
 

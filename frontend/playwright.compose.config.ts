@@ -11,6 +11,11 @@ export default defineConfig({
   reporter: [['list']],
   timeout: 30_000,
   outputDir: 'test-results/compose',
-  use: { baseURL: process.env.COMPOSE_BASE_URL ?? 'http://127.0.0.1:8080', trace: 'retain-on-failure' },
+  // No traces in CI (they hold cookies and typed values and CI artifacts are public); only a screenshot of the failing page.
+  use: {
+    baseURL: process.env.COMPOSE_BASE_URL ?? 'http://127.0.0.1:8080',
+    trace: process.env.CI ? 'off' : 'retain-on-failure',
+    screenshot: process.env.CI ? 'only-on-failure' : 'off',
+  },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 })

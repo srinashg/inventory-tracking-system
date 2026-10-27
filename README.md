@@ -1,5 +1,7 @@
 # TechStore: Inventory & Order Management
 
+[![CI](https://github.com/srinashg/inventory-tracking-system/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/srinashg/inventory-tracking-system/actions/workflows/ci.yml)
+
 TechStore is an internal web application for an electronics retailer. Employees use it to keep the product catalog, track how many units of each product are in each warehouse, take customer orders, and move those orders through picking, packing and shipping, **without ever selling stock that does not exist**.
 
 - [Overview and the problem it solves](#overview-and-the-problem-it-solves)
@@ -14,6 +16,7 @@ TechStore is an internal web application for an electronics retailer. Employees 
 - [Running without Docker (development)](#running-without-docker-development)
 - [Running the tests](#running-the-tests)
 - [Working with Git and GitHub](#working-with-git-and-github)
+- [Continuous integration (GitHub Actions)](#continuous-integration-github-actions)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations and security notes](#known-limitations-and-security-notes)
 - [More documentation](#more-documentation)
@@ -99,6 +102,9 @@ The browser talks only to `web`, so the app and the API share **one origin**: th
 ├── compose.yaml                 the Docker Compose stack
 ├── .env.example                 settings template (copy to .env; .env is never committed)
 ├── TechStore.slnx               the .NET solution
+├── .github/
+│   ├── workflows/               ci.yml (the checks), container-tests.yml (Docker suites; also nightly and manual)
+│   └── dependabot.yml           weekly dependency update pull requests
 ├── backend/
 │   ├── Dockerfile               API image (stages: build, migration-script, migrate, runtime)
 │   ├── controllers/             ASP.NET Core API: controllers, middleware, Program.cs
@@ -465,6 +471,71 @@ git switch main && git pull      # get the latest main
 
 ---
 
+## Continuous integration (GitHub Actions)
+
+Every pull request into `main`, and every push to `main`, is checked automatically. Nothing is deployed and no secret is used: the workflows only build and test, with a read-only token (`contents: read`), and every third-party action is pinned to a full commit SHA.
+
+### What runs
+
+| Check (job name) | What it does | When it runs |
+|---|---|---|
+| **Detect changes** | Compares the pull request with `main` and decides which checks below are needed | always |
+| **Backend build and tests** | Builds the solution; runs the Services, Auth and Api xUnit suites (517 tests) against a throw-away PostgreSQL | backend, test or solution files changed |
+| **Frontend build and tests** | `npm ci`, lint (warnings fail), type-check and production build, Vitest (180 tests) | anything under `frontend/` changed |
+| **Browser tests (Playwright)** | The 48 end-to-end tests against the real API and a throw-away PostgreSQL | backend or frontend changed |
+| **Containers** | The Docker suites that matter for the change (`web-image` 46 checks, `compose-stack` 89, `compose-e2e` 49 with 10 browser tests, `backup-restore` 23), each on its own runner | Dockerfiles, `compose.yaml`, nginx, migrations, provisioning scripts, `.env.example` or the container tests changed |
+| **Secret scan (Gitleaks)** | Scans the whole Git history for secrets; findings show rule, file and line, never the value | always |
+| **Dependency audit (NuGet and npm)** | Fails on High or Critical known vulnerabilities; Moderate and Low are listed in the run summary and as warnings | always |
+| **CI gate** | Judges all of the above (below) | always |
+
+A documentation-only pull request therefore runs only Detect changes, the secret scan, the dependency audit and the gate. Pushes to `main` and manual runs run everything. `container-tests.yml` also runs **every** container suite nightly (03:17 UTC) and can be started by hand from the **Actions** tab (choose all suites or one). A newer push to the same pull request cancels the older run.
+
+### The CI gate and branch protection
+
+**CI gate** is the one check to require. It fails unless every check that had to run succeeded: a required job that failed, was cancelled or was skipped makes it fail; a job is allowed to be skipped only when "Detect changes" decided it was not needed. It is built from the list of jobs it waits for, so a job added to that list is judged automatically.
+
+The `main` branch is protected by the ruleset **Protect main**:
+
+- changes reach `main` only through a pull request; force pushes and branch deletion are blocked;
+- the `CI gate` check (from GitHub Actions) must pass; the branch does not have to be up to date;
+- no approving review is required (there is one maintainer; GitHub does not let an author approve their own pull request), but open review conversations must be resolved;
+- merge commits and squash merges are allowed; there are no bypass actors, so a red gate cannot be overridden.
+
+Do not rename the **CI gate** job: the ruleset requires that exact name. Dependabot opens weekly pull requests (NuGet, npm, GitHub Actions, Docker, Compose) that go through the same checks; auto-merge is off, so a person merges them.
+
+### See the results
+
+On GitHub: the **Checks** section of a pull request, or the **Actions** tab. Each run has a summary with test counts and any vulnerability tables. With the GitHub CLI: `gh pr checks <number>` and `gh run view <run-id> --log-failed`.
+
+When a job fails, it uploads a few short-lived files (3 to 7 days): test result files with test names and messages (`backend-test-results`, `frontend-test-results`), screenshots of failing pages (`browser-test-screenshots`) and redacted container logs (`container-diagnostics-<suite>`). Browser traces, saved login sessions and reports are never uploaded, and random test passwords are masked in the logs.
+
+### Reproduce the checks locally
+
+| Check | Command (details in [Running the tests](#running-the-tests)) |
+|---|---|
+| Backend | `dotnet test TechStore.slnx` (needs PostgreSQL) |
+| Frontend | `cd frontend && npm ci && npm run lint -- --deny-warnings && npm run build && npm test` |
+| Browser | `cd frontend && npm run e2e` |
+| Containers | `bash tests/containers/<suite>.sh` for `web-image`, `compose-stack`, `compose-e2e` or `backup-restore` (needs Docker) |
+| Secrets | the `gitleaks ... git /repo --redact` command above |
+| Dependencies | `dotnet list TechStore.slnx package --vulnerable --include-transitive` and `cd frontend && npm audit` |
+| Workflow files | `docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:latest` |
+
+### Troubleshooting CI
+
+| Symptom | Cause and fix |
+|---|---|
+| **CI gate** is red but the other jobs are green | A job that had to run was skipped or cancelled. Open the gate's log: it prints each job, whether it was required and its result. Re-run the workflow. |
+| The merge button says a required check is expected | No `CI gate` result exists for the latest commit. Check that the workflow ran (a workflow file error shows in the Actions tab), then push again or re-run. |
+| **Dependency audit** fails on a pull request that did not touch dependencies | A new advisory was published. The summary names the package; update it (Dependabot usually offers a pull request). |
+| **Secret scan** fails | Treat the value as exposed: rotate it first. The log gives the file, line and commit; the value is never printed. Removing it in a later commit does not remove it from history. |
+| Frontend fails on lint | `--deny-warnings` makes warnings fail; run `npm run lint` locally and fix them. |
+| A container suite fails | Download `container-diagnostics-<suite>` from the run (redacted logs) and run the same script locally with Docker. |
+| A browser test fails | Download `browser-test-screenshots`; reproduce with `npm run e2e` in `frontend/`. |
+| A new job is not blocking | Add it to `needs` of `ci-gate` and give "Detect changes" an output with the same name. |
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -515,7 +586,7 @@ The full list is in [`docs/deployment-security-checklist.md`](docs/deployment-se
 - On Docker Desktop for macOS, every browser on your computer reaches `web` from the same Docker gateway address, so they share one login rate-limit allowance.
 - A single host: no replicas, no high availability.
 - Scope: one warehouse per order; shipping is a simulated confirmation; no payments, returns, transfers between warehouses or customer storefront (see `docs/requirements.md`).
-- No CI/CD pipeline or cloud deployment yet.
+- Continuous integration is in place (see [Continuous integration](#continuous-integration-github-actions)); there is no continuous deployment or cloud deployment yet.
 
 ## More documentation
 

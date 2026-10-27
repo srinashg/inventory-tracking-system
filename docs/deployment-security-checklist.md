@@ -61,7 +61,7 @@ Legend: **✅ provided and tested** · **☐ you must do this for a real deploym
 ### Operations
 - ☐ Send container logs to a place you monitor. The stack's logs contain no passwords, cookies or tokens (tested); decide what else your log pipeline should keep or hide.
 - ☐ Measure the cost of the per-request security-stamp check under realistic load (NFR4); raise `Auth:SessionRevalidationSeconds` only if it matters (values above 60 log a warning).
-- ☐ Keep base images (`dotnet/aspnet`, `nginx-unprivileged`, `postgres`) and NuGet/npm packages updated; rebuild with `docker compose build --no-cache`.
+- ☐ Keep base images (`dotnet/aspnet`, `nginx-unprivileged`, `postgres`) and NuGet/npm packages updated; rebuild with `docker compose build --no-cache`. Dependabot proposes these updates weekly; CI fails on High or Critical known vulnerabilities.
 - ☐ Provide a way to recover access if the only Admin is locked out or forgets the password (see section 4: there is no tool yet).
 
 ---
@@ -103,4 +103,4 @@ Legend: **✅ provided and tested** · **☐ you must do this for a real deploym
 - **The local http cookie exception** is guarded by the loopback port binding, a startup warning, and the API's refusal to start with it outside Development/Testing unless both settings are present. It cannot stop someone from editing `compose.yaml` to publish the port, which is why section 2 forbids copying those lines.
 - **Docker Desktop for macOS** shows every local browser to nginx as the same gateway address, so they share one login allowance. This does not occur on a Linux server.
 - **A single host.** No replicas, high availability, or zero-downtime deploys.
-- **CI/CD and cloud deployment.** ⏳
+- **Continuous deployment and cloud deployment.** ⏳ (GitHub Actions continuous integration, secret scanning, dependency audits, Dependabot and the `main` ruleset are in place; see the README.)
