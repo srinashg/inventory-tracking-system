@@ -143,3 +143,5 @@ Users and roles support access control only. They have no foreign keys to the in
 - **Rules:** emails are unique (compared case-insensitively); passwords are at least 12 characters and stored only as salted hashes; the security stamp changes when a password changes and whenever an administrator changes a role or locked state, which ends that user's sessions.
 - **Standard Identity tables:** ASP.NET Core Identity also requires `user_claims`, `user_logins`, `user_tokens` and `role_claims`. They stay empty in this application.
 - **Involved in:** sign in, sign out, "who am I" (`GET /api/auth/me`), and the authorization check in front of every protected endpoint.
+
+<!-- CI verification: documentation-only change, not to be merged -->
