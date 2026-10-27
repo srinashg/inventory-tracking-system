@@ -829,3 +829,161 @@ At the end of Step 13:
 **Stop after completing Step 13 and request my approval before beginning Step 14.**
 
 Do not implement CD pipelines, cloud hosting, production deployment, or unrelated application features as part of Step 13.
+
+
+## 14. Performance and Reliability Verification
+
+Verify that TechStore satisfies its documented performance, concurrency, and reliability requirements under realistic, repeatable local workloads.
+
+The primary source of truth is \`docs/requirements.md\`, especially NFR1 (correctness), NFR2 (reliability), NFR4 (performance), NFR7 (observability), NFR9 (data integrity), NFR10 (error handling), and NFR11 (operability). Preserve the existing API contract, architecture, and security boundaries.
+
+**General rules:**
+
+- Follow the existing approval process: implement only the approved subsection, report evidence, and stop before proceeding.
+- Before implementation, inspect the current code, tests, documentation, and environment; do not assume a requirement is already untested or failing.
+- Benchmark against isolated, disposable PostgreSQL databases and application instances. Never load-test or reset the developer's normal database, any shared service, or production-like data.
+- Prefer free, maintainable, reproducible local tooling compatible with the current .NET, React, PostgreSQL, and Docker stack. Propose a tool and explain its tradeoffs before adding it.
+- Measure first; make application or schema optimizations only when measurements or correctness tests justify them and after approval.
+- Record hardware, operating system, runtime, dataset, concurrency, warm-up, run counts, and measurement method so results are not presented as universally representative.
+- Keep generated datasets, benchmark logs, dumps, credentials, and temporary artifacts out of Git. Never expose passwords, session cookies, CSRF tokens, or personal data in output.
+- Work on a feature branch; do not bypass the protected \`main\` branch, merge without approval, modify Dependabot pull requests, or deploy to paid/cloud environments.
+- Every change must preserve existing behavior and pass relevant automated tests and CI checks.
+
+### A. Review Requirements, Architecture, and Propose a Test Plan
+
+Before writing benchmarks or changing code, inspect:
+
+- \`docs/requirements.md\` and its measurable nonfunctional acceptance criteria.
+- \`docs/architecture.md\`, \`docs/services.md\`, and \`docs/api-contract.md\` where relevant.
+- The ASP.NET Core controllers and services for product search, inventory lookup, receiving, orders, reservation, picking, packing, and shipping.
+- EF Core queries, indexes, migrations, PostgreSQL constraints, and transaction boundaries.
+- The existing xUnit, Playwright, Vitest, and container test suites.
+- Current structured logging, error handling, health checks, and Docker test isolation mechanisms.
+
+Identify which requirements are already proven by tests, which need new evidence, and which are outside Step 14.
+
+Propose the workload matrix, tooling, fixture-generation method, isolation strategy, key metrics, pass/fail thresholds, and expected sources of measurement variability.
+
+Do not silently invent additional product requirements. Label any proposed exploratory targets as proposals rather than existing acceptance criteria.
+
+**Stop and request my approval of the Step 14 plan before implementing benchmarks or modifying application code.**
+
+### B. Establish Reproducible Local Performance Fixtures and Measurement Tools
+
+Create a safe, repeatable performance-test setup based on the approved plan.
+
+Requirements:
+
+1. Provision a separate, disposable PostgreSQL database and API instance using dedicated configuration or containers.
+2. Generate realistic, deterministic test data with **10,000 products and 1,000 orders** as required by NFR4, with appropriate warehouses, inventory, and order states.
+3. Ensure fixture generation is idempotent or explicitly resets only the dedicated performance database.
+4. Use existing authentication, permissions, and CSRF protections rather than bypassing them for benchmark convenience.
+5. Provide commands to create fixtures, run a smoke test, execute benchmarks, and safely clean up.
+6. Capture machine/runtime details and measurement configuration. Keep fixtures and result files clearly separated from application source.
+7. Verify that benchmark tooling cannot accidentally target the developer's normal database or a remote environment.
+
+Do not proceed until setup and teardown are demonstrated to be safe and reproducible.
+
+### C. Measure Baseline API and Database Performance
+
+Measure the existing implementation before tuning it.
+
+At minimum, measure representative read endpoints and the reservation path, distinguishing API response time from database-query measurements where practical.
+
+For NFR4, test the documented dataset and verify:
+
+- **At least 95% of read requests complete in under 300 ms.**
+- **At least 95% of reservation requests complete in under 750 ms.**
+
+Specify the exact endpoints, workload mix, concurrent clients, request counts, warm-up, and whether timings include HTTP/authentication overhead. Measure latency distribution (including p50, p95 and p99), throughput, error rate, and resource usage where practical.
+
+Do not count rejected, unauthorized, or otherwise failed requests as successful fast requests. Report failures separately and make sure reservations use valid test preconditions rather than running out of stock unintentionally.
+
+Run multiple measured iterations after warm-up. Preserve reproducible results and clearly distinguish verified findings from environmental noise. If results miss targets, identify plausible bottlenecks using evidence such as EF Core query behavior or PostgreSQL query plans before proposing changes.
+
+**Stop for approval after reporting baseline results and any proposed optimizations.**
+
+### D. Verify Concurrent Inventory Correctness
+
+Test NFR1 and related NFR9 integrity rules under simultaneous requests.
+
+Required scenario: **100 concurrent reservation attempts against the same 10 available units must cause zero oversells**. Verify that reserved stock never exceeds on-hand stock and available stock never becomes negative.
+
+Also verify, where the existing API supports it:
+
+- Contention across separate orders competing for the same inventory.
+- Appropriate success/conflict responses without partial reservations.
+- Invariants after all requests finish, using database state rather than HTTP responses alone.
+- Behavior under repeat runs and varying concurrency.
+- Existing unique, check, and foreign-key constraints remain effective.
+
+Use independent authenticated sessions or clients where necessary and avoid sharing unsafe mutable test state. Clearly record the number of successful and rejected requests. Do not loosen database constraints to improve apparent throughput.
+
+**Stop for approval after reporting concurrency findings and any proposed fixes.**
+
+### E. Verify Transactions, Idempotency, and Failure Recovery
+
+Test NFR2 and relevant portions of NFR10/NFR11 in the disposable test environment.
+
+Prove that:
+
+1. Injected failures in multi-step operations result in **zero partial writes**.
+2. Repeated shipping requests **never deduct inventory twice**.
+3. Stock and order state remain consistent when requests fail or are retried.
+4. Database unavailability and application restarts cause predictable, non-sensitive error responses or health-state changes, with successful recovery when the dependency returns.
+5. Timeouts and cancellation are handled sensibly where applicable, without leaving corrupt or partially committed data.
+6. Logs provide enough information to investigate a failed operation without exposing secrets.
+
+Favor deterministic fault injection and existing test hooks over random process kills. Preserve existing container restart, persistence, and backup/restore guarantees; do not substitute destructive failure testing for those suites.
+
+**Stop for approval after reporting reliability evidence and any proposed changes.**
+
+### F. Optimize Only Confirmed Problems and Verify No Regression
+
+If the approved baseline or reliability tests reveal a real issue, propose the smallest justified fix before implementing it.
+
+Potential areas to inspect include expensive database queries, missing or ineffective indexes, unnecessary data loading, transaction contention, excessive round trips, or inappropriate timeout handling. These are investigation candidates, not predetermined defects.
+
+For each approved optimization:
+
+1. Record the original measurement and a clear hypothesis.
+2. Make one narrowly scoped change at a time.
+3. Repeat comparable benchmarks on the same dataset and environment.
+4. Report before/after p50, p95, p99, throughput, and error rates, including any tradeoffs.
+5. Rerun relevant unit, integration, security, browser, and container tests.
+6. Verify that concurrency, inventory constraints, and idempotency remain correct.
+
+Do not add caching, queues, new infrastructure, schema migrations, or broad architectural changes without separate explicit approval. If all targets pass reliably, avoid unnecessary optimization.
+
+### G. Document and Integrate Performance and Reliability Checks
+
+Update the README and appropriate technical documentation to explain:
+
+- How to provision and destroy the isolated test environment.
+- How to generate the dataset and reproduce benchmark runs.
+- Which requests and scenarios are measured.
+- Measured latency distributions, throughput, error rates, and machine/configuration details.
+- Whether NFR1, NFR2, and NFR4 acceptance criteria passed.
+- Known limitations, variability, and any unverified resilience scenarios.
+- Troubleshooting guidance for common test failures.
+
+Add repeatable correctness/reliability regression tests to the appropriate existing test suite. Propose any CI integration separately, balancing cost and runtime; do not automatically make heavy load tests required on every pull request. Keep benchmark artifacts sanitized and out of version control.
+
+Use a feature branch and confirm all existing required CI checks still pass. Do not merge to \`main\` without explicit approval.
+
+### H. Completion and Approval
+
+At the end of Step 14:
+
+- Summarize the environment, tooling, data fixtures, workloads, and commands.
+- Present measured baseline and final results for the exact NFR4 targets, or clearly report what remains unverified.
+- Present evidence for NFR1's 100-versus-10 concurrency scenario and NFR2's rollback/idempotency scenarios.
+- Identify fixes made, before/after measurements, and all regression-test results.
+- Provide links to applicable commits, pull requests, and CI runs.
+- Confirm isolation, cleanup, confidentiality, and preservation of existing functionality.
+- Identify any deferred risks, machine-dependent findings, or proposed future work.
+- Verify branch protection and the final repository state after any approved merge.
+
+**Stop after completing Step 14 and request my approval before beginning Step 15, deployment, or unrelated features.**
+
+Do not implement production hosting, CD pipelines, cloud infrastructure, or unrelated application features as part of Step 14.
