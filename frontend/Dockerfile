@@ -1,7 +1,7 @@
 # The web container. Build context: the frontend/ folder (docker build -t techstore-web frontend).
 # Stage 1 builds the React app with Node; stage 2 is a non-root nginx that serves the result and proxies the API.
 
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
