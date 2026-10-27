@@ -2,8 +2,9 @@
 #   changes   decides which checks a pull request needs (documentation-only changes skip the expensive ones)
 #   backend   builds the .NET solution and runs the xUnit suites against a throw-away PostgreSQL
 #   frontend  installs the npm packages, lints, type-checks and builds the React app, and runs the Vitest suite
+#   browser   runs the Playwright suite against the real API and a throw-away PostgreSQL (login, roles, workflow, sessions)
 #   ci-gate   the ONE check to require before merging: it fails unless every check that had to run succeeded
-# Later steps add more jobs (browser tests, security, containers) and list them in the gate.
+# Later steps add more jobs (security, containers) and list them in the gate.
 name: CI
 
 on:
@@ -35,6 +36,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      browser: ${{ steps.filter.outputs.browser }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,42 +50,41 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           set -u
+          emit() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+
           # Anything that is not a pull request (a push to main, a manual run) runs everything.
           if [ "$EVENT" != "pull_request" ]; then
             echo "Event '$EVENT': running everything."
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            emit backend true; emit frontend true; emit browser true
             exit 0
           fi
 
           # The pull request's merge commit has the target branch as its first parent.
           if ! files=$(git diff --name-only HEAD^1 HEAD); then
             echo "Could not compare with the target branch: running everything to be safe."
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            emit backend true; emit frontend true; emit browser true
             exit 0
           fi
 
           echo "Changed files:"
           while IFS= read -r file; do echo "  $file"; done <<< "$files"
 
+          changed() { echo "$files" | grep -qE "$1"; }
+
           # Files that can change what the backend does or how it is built and tested.
-          if echo "$files" | grep -qE '^(backend/|tests/TechStore\.|TechStore\.slnx$|global\.json$|Directory\.(Build|Packages)\.|[Nn]u[Gg]et\.[Cc]onfig$|\.github/workflows/ci\.yml$)'; then
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-            echo "Backend checks: required."
-          else
-            echo "backend=false" >> "$GITHUB_OUTPUT"
-            echo "Backend checks: not needed for this change."
-          fi
+          backend=false
+          if changed '^(backend/|tests/TechStore\.|TechStore\.slnx$|global\.json$|Directory\.(Build|Packages)\.|[Nn]u[Gg]et\.[Cc]onfig$|\.github/workflows/ci\.yml$)'; then backend=true; fi
 
           # Everything under frontend/ (source, tests, lockfile, Dockerfile, nginx files) can change the build, the type-check or the tests.
-          if echo "$files" | grep -qE '^(frontend/|\.github/workflows/ci\.yml$)'; then
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
-            echo "Frontend checks: required."
-          else
-            echo "frontend=false" >> "$GITHUB_OUTPUT"
-            echo "Frontend checks: not needed for this change."
-          fi
+          frontend=false
+          if changed '^(frontend/|\.github/workflows/ci\.yml$)'; then frontend=true; fi
+
+          # The browser tests exercise the whole application, so any change to the backend or the frontend needs them.
+          browser=false
+          if [ "$backend" = true ] || [ "$frontend" = true ]; then browser=true; fi
+
+          emit backend "$backend"; emit frontend "$frontend"; emit browser "$browser"
+          echo "Decisions: backend=$backend frontend=$frontend browser=$browser"
 
   backend:
     name: Backend build and tests
@@ -239,9 +240,95 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  browser:
+    name: Browser tests (Playwright)
+    needs: changes
+    if: needs.changes.outputs.browser == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Same disposable PostgreSQL as the backend job. The tests create and drop their own database (techstore_e2e) in it.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # The test harness applies the EF Core migrations to its own database with dotnet-ef, and needs psql to create that database.
+      - name: Install dotnet-ef and check psql
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.14
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          command -v psql >/dev/null || sudo apt-get install -y --no-install-recommends postgresql-client
+          psql --version
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install the Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      # The test accounts get a random password for this run. It is created here so that it can be masked: GitHub then replaces
+      # it with *** anywhere it would appear in a log.
+      - name: Create a throw-away password for the test accounts
+        run: |
+          password="$(openssl rand -hex 16)"
+          echo "::add-mask::$password"
+          echo "E2E_PASSWORD=$password" >> "$GITHUB_ENV"
+
+      - name: Run the Playwright suite
+        working-directory: frontend
+        run: npm run e2e
+
+      # Screenshots of failing pages only. Traces, saved sessions and reports are never uploaded (see playwright.config.ts).
+      - name: Upload failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-test-screenshots
+          path: |
+            frontend/test-results/**/*.png
+            !frontend/test-results/sessions/**
+          retention-days: 3
+          if-no-files-found: ignore
+
   ci-gate:
     name: CI gate
-    needs: [changes, backend, frontend]
+    # Every job above is listed here, and the gate judges every job listed (see below). Add new jobs to this list and give
+    # "changes" an output with the same name as the job.
+    needs: [changes, backend, frontend, browser]
     # Runs even when a job above failed, was skipped or was cancelled: those are exactly the cases it must judge.
     if: always()
     runs-on: ubuntu-24.04
@@ -257,6 +344,12 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           problems = []
 
+          # The jobs that must exist in "needs" above. If someone removes one from the list, the gate fails instead of
+          # silently ignoring it.
+          CORE_JOBS = {"backend", "frontend", "browser"}
+          for job in sorted(CORE_JOBS - needs.keys()):
+              problems.append(f"'{job}' is missing from the gate's needs list")
+
           def result(job):
               return needs.get(job, {}).get("result", "missing")
 
@@ -265,19 +358,20 @@ jobs:
               problems.append(f"'changes' did not succeed (result: {result('changes')})")
           outputs = needs.get("changes", {}).get("outputs", {})
 
-          # The decision must be an explicit "true" or "false". Anything else (missing, garbled) is treated as a failure, never as
-          # "not required", so a broken decision step cannot let a skipped check count as success.
-          for name in ("backend", "frontend"):
-              if outputs.get(name) not in ("true", "false"):
-                  problems.append(f"the decision for '{name}' is missing or invalid: {outputs.get(name)!r}")
-
-          # job name -> does this change require it? (a skipped job is acceptable ONLY when it was explicitly not required)
-          required = {name: outputs.get(name) == "true" for name in ("backend", "frontend")}
-
+          # Every OTHER job in the needs list is judged, so a job added to "needs" can never be forgotten here. Its decision is the
+          # "changes" output with the job's name and must be an explicit "true" or "false": a missing or garbled decision is a
+          # failure, never "not required".
           print(f"{'job':<12} {'required':<9} result")
-          for job, must_run in required.items():
+          for job in sorted(needs.keys() - {"changes"}):
+              decision = outputs.get(job)
               res = result(job)
+              if decision not in ("true", "false"):
+                  problems.append(f"the decision for '{job}' is missing or invalid: {decision!r}")
+                  print(f"{job:<12} {'?':<9} {res}")
+                  continue
+              must_run = decision == "true"
               print(f"{job:<12} {str(must_run):<9} {res}")
+              # A skipped job is acceptable ONLY when it was explicitly not required.
               if must_run and res != "success":
                   problems.append(f"'{job}' was required but its result is '{res}'")
               elif not must_run and res not in ("skipped", "success"):

@@ -20,7 +20,9 @@ export default defineConfig({
   retries: 0,
   reporter: [['list']],
   timeout: 30_000,
-  use: { trace: 'retain-on-failure' },
+  // Locally a failed test keeps a trace. In CI (which sets CI=true) traces are off, because a trace holds cookies and typed values and
+  // CI artifacts are public; only a screenshot of the failing page is kept.
+  use: { trace: process.env.CI ? 'off' : 'retain-on-failure', screenshot: process.env.CI ? 'only-on-failure' : 'off' },
   projects: [
     // Signs each shared test account in once through the login screen and saves the browser sessions for the other tests.
     { name: 'setup', testMatch: /auth\.setup\.ts/, use: { ...devices['Desktop Chrome'], baseURL: webUrl } },
@@ -44,7 +46,7 @@ export default defineConfig({
       url: `http://127.0.0.1:${config.strictApiPort}/health`, // the strict instance starts last
       reuseExistingServer: false,
       timeout: 300_000, // the first run compiles the backend
-      stdout: 'ignore', // the API's own log is noisy; failures still show test output and traces
+      stdout: process.env.CI ? 'pipe' : 'ignore', // noisy locally; in CI the servers' output helps to diagnose a failed start
     },
     {
       command: `npx vite --host 127.0.0.1 --port ${config.webPort} --strictPort`,
