@@ -17,6 +17,9 @@ DBPW=$(openssl rand -hex 24)
 APPPW=$(openssl rand -hex 24)
 ADMIN_EMAIL=admin@composetest.example
 ADMIN_PW="Adm-$(openssl rand -hex 12)"
+# shellcheck source=tests/containers/ci-support.sh
+. tests/containers/ci-support.sh
+ci_mask "$DBPW" "$APPPW" "$ADMIN_PW"
 cat > "$ENVFILE" <<ENV
 POSTGRES_PASSWORD=$DBPW
 TECHSTORE_APP_DB_PASSWORD=$APPPW
@@ -33,7 +36,13 @@ has()  { if printf '%s' "$2" | grep -qi -- "$3"; then ok "$1"; else bad "$1" "[$
 hasnt(){ if printf '%s' "$2" | grep -qi -- "$3"; then bad "$1" "[$3] found"; else ok "$1"; fi; }
 
 dc() { docker compose -p $PROJECT --env-file "$ENVFILE" "$@"; }
-cleanup() { dc down -v >/dev/null 2>&1; rm -rf "$WORK"; }
+cleanup() {
+  local rc=$?
+  if [ -n "${CI_LOG_DIR:-}" ] && { [ "$fail" -gt 0 ] || [ "$rc" -ne 0 ]; }; then
+    dc logs --no-color 2>&1 | ci_save_logs compose-stack "$DBPW" "$APPPW" "$ADMIN_PW"
+  fi
+  dc down -v >/dev/null 2>&1; rm -rf "$WORK"
+}
 trap cleanup EXIT
 dc down -v >/dev/null 2>&1
 

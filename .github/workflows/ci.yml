@@ -3,8 +3,9 @@
 #   backend   builds the .NET solution and runs the xUnit suites against a throw-away PostgreSQL
 #   frontend  installs the npm packages, lints, type-checks and builds the React app, and runs the Vitest suite
 #   browser   runs the Playwright suite against the real API and a throw-away PostgreSQL (login, roles, workflow, sessions)
+#   containers  runs the Docker Compose container suites that matter for the change (container-tests.yml)
 #   ci-gate   the ONE check to require before merging: it fails unless every check that had to run succeeded
-# Later steps add more jobs (security, containers) and list them in the gate.
+# Later steps add more jobs (security) and list them in the gate.
 name: CI
 
 on:
@@ -37,6 +38,8 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
       browser: ${{ steps.filter.outputs.browser }}
+      containers: ${{ steps.filter.outputs.containers }}
+      container_suites: ${{ steps.filter.outputs.container_suites }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,6 +59,7 @@ jobs:
           if [ "$EVENT" != "pull_request" ]; then
             echo "Event '$EVENT': running everything."
             emit backend true; emit frontend true; emit browser true
+            emit containers true; emit container_suites '["web-image","compose-stack","compose-e2e","backup-restore"]'
             exit 0
           fi
 
@@ -63,6 +67,7 @@ jobs:
           if ! files=$(git diff --name-only HEAD^1 HEAD); then
             echo "Could not compare with the target branch: running everything to be safe."
             emit backend true; emit frontend true; emit browser true
+            emit containers true; emit container_suites '["web-image","compose-stack","compose-e2e","backup-restore"]'
             exit 0
           fi
 
@@ -83,8 +88,28 @@ jobs:
           browser=false
           if [ "$backend" = true ] || [ "$frontend" = true ]; then browser=true; fi
 
+          # Container suites. Each runs only when a file it depends on changed; changing the suites themselves, their helper or the
+          # workflows that run them runs all of them.
+          suites=()
+          container_files='tests/containers/|\.github/workflows/(ci|container-tests)\.yml$'
+          # web-image: the web image (React build, nginx) and how it is built
+          if changed "^(frontend/Dockerfile$|frontend/nginx/|frontend/\.dockerignore$|$container_files)"; then suites+=(web-image); fi
+          # compose-stack and compose-e2e: the whole stack (compose file, both images, migrations, limited database user, settings)
+          if changed "^(compose\.yaml$|\.env\.example$|\.dockerignore$|backend/Dockerfile$|backend/database/(Migrations|Provisioning)/|frontend/Dockerfile$|frontend/nginx/|$container_files)"; then suites+=(compose-stack compose-e2e); fi
+          # backup-restore: the database schema, its grants, and the stack that holds them
+          if changed "^(compose\.yaml$|backend/Dockerfile$|backend/database/(Migrations|Provisioning)/|$container_files)"; then suites+=(backup-restore); fi
+
+          containers=false
+          container_suites='[]'
+          if [ "${#suites[@]}" -gt 0 ]; then
+            containers=true
+            container_suites=$(printf '"%s",' "${suites[@]}")
+            container_suites="[${container_suites%,}]"
+          fi
+
           emit backend "$backend"; emit frontend "$frontend"; emit browser "$browser"
-          echo "Decisions: backend=$backend frontend=$frontend browser=$browser"
+          emit containers "$containers"; emit container_suites "$container_suites"
+          echo "Decisions: backend=$backend frontend=$frontend browser=$browser containers=$containers $container_suites"
 
   backend:
     name: Backend build and tests
@@ -324,11 +349,22 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
+  # The Docker Compose container suites that matter for this change (see container-tests.yml). On a push to main: all of them.
+  containers:
+    name: Containers
+    needs: changes
+    if: needs.changes.outputs.containers == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/container-tests.yml
+    with:
+      suites: ${{ needs.changes.outputs.container_suites }}
+
   ci-gate:
     name: CI gate
     # Every job above is listed here, and the gate judges every job listed (see below). Add new jobs to this list and give
     # "changes" an output with the same name as the job.
-    needs: [changes, backend, frontend, browser]
+    needs: [changes, backend, frontend, browser, containers]
     # Runs even when a job above failed, was skipped or was cancelled: those are exactly the cases it must judge.
     if: always()
     runs-on: ubuntu-24.04
@@ -346,7 +382,7 @@ jobs:
 
           # The jobs that must exist in "needs" above. If someone removes one from the list, the gate fails instead of
           # silently ignoring it.
-          CORE_JOBS = {"backend", "frontend", "browser"}
+          CORE_JOBS = {"backend", "frontend", "browser", "containers"}
           for job in sorted(CORE_JOBS - needs.keys()):
               problems.append(f"'{job}' is missing from the gate's needs list")
 

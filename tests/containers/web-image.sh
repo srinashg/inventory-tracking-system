@@ -13,7 +13,16 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3] got [$2
 has()  { if printf '%s' "$2" | grep -qi -- "$3"; then ok "$1"; else bad "$1" "[$3] not found in: $(printf '%s' "$2" | head -c 300)"; fi; }
 hasnt(){ if printf '%s' "$2" | grep -qi -- "$3"; then bad "$1" "[$3] found"; else ok "$1"; fi; }
 
-cleanup() { docker rm -f "$WEB" "$UP" >/dev/null 2>&1; docker network rm "$NET" >/dev/null 2>&1; }
+# shellcheck source=tests/containers/ci-support.sh
+. tests/containers/ci-support.sh
+
+cleanup() {
+  local rc=$?
+  if [ -n "${CI_LOG_DIR:-}" ] && { [ "$fail" -gt 0 ] || [ "$rc" -ne 0 ]; }; then
+    { docker logs "$WEB" 2>&1; docker logs "$UP" 2>&1; } | ci_save_logs web-image
+  fi
+  docker rm -f "$WEB" "$UP" >/dev/null 2>&1; docker network rm "$NET" >/dev/null 2>&1
+}
 trap cleanup EXIT
 cleanup
 
