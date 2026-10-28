@@ -68,3 +68,8 @@ npm-debug.log*
 Thumbs.db
 *.orig
 *.bak
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Performance tooling output (Step 14): passwords, live session cookies, logs and benchmark results. Never commit.
+# ---------------------------------------------------------------------------------------------------------------------
+tests/performance/.results/
