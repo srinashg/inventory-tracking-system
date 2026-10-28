@@ -115,6 +115,11 @@ cmd_fixtures() {
   { echo "SELECT set_config('techstore.app_password', '$PERF_APP_PASSWORD', false);"
     echo "SELECT set_config('techstore.app_role', '$APP_ROLE', false);"
     cat "$REPO/backend/database/Provisioning/app-role.sql"; } | psql_perf "$TEMPLATE_DB" >/dev/null
+  # The three test accounts are created once, inside the template, by starting the API against it. Every database cloned from the template
+  # then already has them (same users, same security stamps), so signed-in sessions stay valid across "reset".
+  say "creating the test accounts in the template"
+  start_api "$TEMPLATE_DB"
+  api_stop_quiet
   say "validating the fixtures"
   psql_perf "$TEMPLATE_DB" -f "$HERE/sql/02-validate-fixtures.sql" | tee "$RESULTS/fixture-validation.txt"
   psql_perf "$TEMPLATE_DB" -f "$HERE/sql/03-invariants.sql"
@@ -133,17 +138,25 @@ cmd_reset() {
   say "run database $RUN_DB recreated from the template"
 }
 
-cmd_api_start() {
+cmd_api_start() { start_api "$RUN_DB"; }
+
+# Starts the Release API against ONE of our databases. The cookie-encryption keys live in .results/dpkeys, so a session signed in earlier
+# stays valid after the API restarts (and after "reset", because the template database already holds the test accounts).
+start_api() {
+  local database="$1"
+  assert_perf_db "$database"
   load_secrets
   api_is_ours && { say "the API is already running (pid $(api_pid))"; return 0; }
   port_in_use "$API_PORT" && die "port $API_PORT is in use by something else"
-  database_exists "$RUN_DB" || die "no run database yet: run '$0 reset'"
+  database_exists "$database" || die "database $database does not exist yet: run '$0 reset' (or 'fixtures' for the template)"
+  mkdir -p "$RESULTS/dpkeys" && chmod 700 "$RESULTS/dpkeys"
   local out="$REPO/backend/controllers/bin/Release/net10.0"
   [ -f "$out/TechStore.Api.dll" ] || die "no Release build yet: run '$0 fixtures'"
   # env -i: the API sees ONLY what is listed here. The Testing environment is what allows the test accounts (it refuses them elsewhere).
   ( cd "$out"; env -i PATH="$PATH" HOME="$HOME" DOTNET_ROOT="${DOTNET_ROOT:-}" \
       ASPNETCORE_ENVIRONMENT=Testing ASPNETCORE_URLS="http://$API_HOST:$API_PORT" \
-      ConnectionStrings__TechStore="Host=$PG_HOST;Port=$PG_PORT;Database=$RUN_DB;Username=$APP_ROLE;Password=$PERF_APP_PASSWORD" \
+      ConnectionStrings__TechStore="Host=$PG_HOST;Port=$PG_PORT;Database=$database;Username=$APP_ROLE;Password=$PERF_APP_PASSWORD" \
+      DataProtection__KeysPath="$RESULTS/dpkeys" \
       Auth__TestAccounts__0__Email="perf.admin@perf.test" Auth__TestAccounts__0__Password="$PERF_ACCOUNT_PASSWORD" Auth__TestAccounts__0__Role="Admin" \
       Auth__TestAccounts__1__Email="perf.sales@perf.test" Auth__TestAccounts__1__Password="$PERF_ACCOUNT_PASSWORD" Auth__TestAccounts__1__Role="Sales" \
       Auth__TestAccounts__2__Email="perf.warehouse@perf.test" Auth__TestAccounts__2__Password="$PERF_ACCOUNT_PASSWORD" Auth__TestAccounts__2__Role="Warehouse" \
@@ -155,6 +168,8 @@ cmd_api_start() {
   tail -n 20 "$RESULTS/api.log" >&2 || true
   die "the API did not become healthy"
 }
+
+api_stop_quiet() { cmd_api_stop >/dev/null; }
 
 cmd_api_stop() {
   if api_is_ours; then
@@ -172,6 +187,96 @@ cmd_sessions() { # sessions 10:sales 2:warehouse 1:admin
   PERF_ACCOUNT_PASSWORD="$PERF_ACCOUNT_PASSWORD" python3 -I "$HERE/sessions.py" --host "$API_HOST" --port "$API_PORT" \
     --out "$RESULTS/sessions.json" --pace "$PACE_SECONDS" "$@"
 }
+
+cmd_sessions_check() { # are the saved sessions still accepted by the running API?
+  load_secrets
+  api_is_ours || die "the API is not running: run '$0 api start'"
+  [ -f "$RESULTS/sessions.json" ] || die "no sessions yet: run '$0 sessions ...'"
+  python3 -I "$HERE/sessions.py" --host "$API_HOST" --port "$API_PORT" --out "$RESULTS/sessions.json" --pace 0 --check
+}
+
+# ---- Resource sampler: while a benchmark runs, records the API process, the k6 process and the database container every ~3 s ----------
+SAMPLER_PID=""
+start_sampler() { # $1 = CSV file
+  local file="$1" apid; apid="$(api_pid)"
+  echo "epoch,api_cpu_pct,api_rss_mb,k6_cpu_pct,k6_rss_mb,db_cpu_pct,db_mem_mb" > "$file"
+  (
+    set +e # one failed sample (for example no k6 process yet) must never stop the sampler
+    while :; do
+      api="$(ps -p "$apid" -o %cpu=,rss= 2>/dev/null | awk '{printf "%s,%.1f", $1, $2/1024}')"
+      kpids="$(pgrep -x k6 | paste -sd, - || true)"
+      k6="$([ -n "$kpids" ] && ps -p "$kpids" -o %cpu=,rss= 2>/dev/null | awk '{c+=$1; r+=$2} END {printf "%.1f,%.1f", c, r/1024}')"
+      db="$(docker stats --no-stream --format '{{.CPUPerc}} {{.MemUsage}}' "$CONTAINER" 2>/dev/null | awk '{gsub("%","",$1); m=$2; v=m+0; if (m ~ /GiB/) v=v*1024; printf "%s,%.1f", $1, v}')"
+      echo "$(date +%s),${api:-0,0},${k6:-0,0},${db:-0,0}" >> "$file"
+      sleep 1
+    done
+  ) &
+  SAMPLER_PID=$!
+}
+stop_sampler() { [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null || true; wait "$SAMPLER_PID" 2>/dev/null || true; SAMPLER_PID=""; }
+
+# k6 against the isolated API: $1 script, $2 summary file, the rest are extra "-e KEY=VALUE" pairs for the script.
+run_k6() {
+  local script="$1" summary="$2"; shift 2
+  local first count
+  first="$(psql_perf "$RUN_DB" -tAc "SELECT coalesce(min(order_id), 0) FROM orders WHERE status = 'Draft' AND order_id > 1000")"
+  count="$(psql_perf "$RUN_DB" -tAc "SELECT count(*) FROM orders WHERE status = 'Draft' AND order_id > 1000")"
+  env -i PATH="$PATH" HOME="$HOME" k6 run --quiet \
+    -e BASE_URL="http://$API_HOST:$API_PORT" -e SESSIONS_FILE="$RESULTS/sessions.json" -e DRAFT_FIRST="$first" -e DRAFT_COUNT="$count" \
+    "$@" --summary-export "$summary" "$HERE/k6/$script"
+}
+
+# bench reads|reservations CLIENTS ITERATIONS : warm-up + measured iterations at a fixed number of concurrent clients (Step 14C).
+cmd_bench() {
+  local kind="${1:-}" clients="${2:-}" iterations="${3:-}"
+  [[ "$kind" =~ ^(reads|reservations)$ ]] && [[ "$clients" =~ ^[0-9]+$ ]] && [[ "$iterations" =~ ^[0-9]+$ ]] || die "usage: bench reads|reservations CLIENTS ITERATIONS"
+  load_secrets
+  command -v k6 >/dev/null || die "k6 is not installed (brew install k6)"
+  [ -f "$RESULTS/sessions.json" ] || die "no sessions yet: run '$0 sessions $clients:sales'"
+  local dir="$RESULTS/baseline"; mkdir -p "$dir"
+  local warm measure i
+  if [ "$kind" = reads ]; then warm=30; measure=60; else
+    if [ "$clients" -le 1 ]; then warm=50; measure=300; else warm=200; measure=1000; fi
+  fi
+  for i in $(seq 1 "$iterations"); do
+    local tag="$kind-c$clients-i$i"
+    say "== $tag: $([ "$kind" = reads ] && echo "warm-up ${warm}s, measured ${measure}s" || echo "warm-up $warm requests, measured $measure requests")"
+    if [ "$kind" = reservations ]; then
+      # Every iteration starts from the same state: the run database is recreated from the template and gets fresh Draft orders.
+      cmd_reset >/dev/null
+      cmd_api_start >/dev/null
+      cmd_drafts $((warm + measure)) 2 >/dev/null
+    else
+      api_is_ours || cmd_api_start >/dev/null
+      [ "$i" -gt 1 ] && sleep 10 # a short rest between iterations
+    fi
+    cmd_sessions_check >/dev/null || die "the saved sessions are no longer accepted"
+    psql_perf "$RUN_DB" -c 'SELECT pg_stat_statements_reset()' >/dev/null
+    start_sampler "$dir/resources-$tag.csv"
+    local status=0
+    if [ "$kind" = reads ]; then
+      run_k6 baseline-reads.js "$dir/$tag.json" -e VUS="$clients" -e WARMUP_S="$warm" -e MEASURE_S="$measure" > "$dir/$tag.log" 2>&1 || status=$?
+    else
+      run_k6 baseline-reservations.js "$dir/$tag.json" -e VUS="$clients" -e WARMUP_N="$warm" -e MEASURE_N="$measure" > "$dir/$tag.log" 2>&1 || status=$?
+    fi
+    stop_sampler
+    psql_perf "$RUN_DB" -tAc "SELECT 'statements: ' || sum(calls) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())" > "$dir/dbcalls-$tag.txt" || true
+    cmd_pgstats 12 > "$dir/pgstats-$tag.txt" 2>&1 || true
+    cmd_invariants "$RUN_DB" > "$dir/invariants-$tag.txt" 2>&1 || { say "INVARIANT FAILURE in $tag (see $dir/invariants-$tag.txt)"; status=1; }
+    [ "$status" -eq 0 ] || say "k6 exited with status $status for $tag (a failed k6 threshold or error: see $dir/$tag.log)"
+  done
+}
+
+cmd_pgstats() { # pgstats [N] : the N statements that took the most database time since the last reset
+  load_secrets
+  psql_perf "$RUN_DB" -c "
+    SELECT calls, round(total_exec_time::numeric, 1) AS total_ms, round(mean_exec_time::numeric, 3) AS mean_ms, rows,
+           left(regexp_replace(query, '\s+', ' ', 'g'), 100) AS statement
+    FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+    ORDER BY total_exec_time DESC LIMIT ${1:-12}"
+}
+
+cmd_report() { python3 -I "$HERE/summarize.py" "$RESULTS/${1:-baseline}"; }
 
 cmd_drafts() {
   load_secrets
@@ -248,8 +353,8 @@ cmd_down() {
   fi
   # Only the files this tool creates, by name: never a recursive delete.
   rm -f "$RESULTS/perf.env" "$RESULTS/api.pid" "$RESULTS/api.log" "$RESULTS/sessions.json" "$RESULTS/environment.txt" \
-        "$RESULTS/dataset-checksum.txt" "$RESULTS/fixture-validation.txt" "$RESULTS/smoke.log" "$RESULTS"/k6/*.json
-  rmdir "$RESULTS/k6" 2>/dev/null || true
+        "$RESULTS/dataset-checksum.txt" "$RESULTS/fixture-validation.txt" "$RESULTS/smoke.log" "$RESULTS"/k6/*.json "$RESULTS"/baseline/* "$RESULTS"/baseline-run1/* "$RESULTS"/dpkeys/*
+  rmdir "$RESULTS/k6" "$RESULTS/baseline" "$RESULTS/baseline-run1" "$RESULTS/dpkeys" 2>/dev/null || true
   rmdir "$RESULTS" 2>/dev/null || say "left $RESULTS in place: it holds files this tool did not create"
   say "cleaned up"
 }
@@ -280,6 +385,10 @@ tests/performance/perf.sh COMMAND
   drafts N [LINES]   add N fresh Draft orders (ids 1001+) with their own stock rows, for reservation benchmarks
   run SCRIPT.js      run a k6 script from tests/performance/k6 against the isolated API
   invariants         check the stock and order invariants in the run database
+  sessions-check     check that the saved sessions are still accepted by the running API
+  bench KIND C N     baseline: KIND reads|reservations, C concurrent clients, N measured iterations (warm-up included)
+  pgstats [N]        the N SQL statements with the most database time since the last reset
+  report             summarize the baseline results (percentiles, throughput, error rates, resources)
   smoke              reset + API + sessions + drafts + k6 smoke test + invariants + stop
   info               record machine, runtime and configuration details
   down               remove the container, volume and every file this tool created
@@ -296,6 +405,10 @@ case "${1:-help}" in
   drafts) shift; cmd_drafts "$@" ;;
   run) shift; cmd_run "$@" ;;
   invariants) cmd_invariants ;;
+  sessions-check) cmd_sessions_check ;;
+  bench) shift; cmd_bench "$@" ;;
+  pgstats) shift; cmd_pgstats "$@" ;;
+  report) shift; cmd_report "$@" ;;
   smoke) cmd_smoke ;;
   info) cmd_info ;;
   down) cmd_down ;;

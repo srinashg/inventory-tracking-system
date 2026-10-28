@@ -73,13 +73,25 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--pace", type=float, required=True)
-    parser.add_argument("requests", nargs="+", help="COUNT:ROLE, for example 10:sales")
+    parser.add_argument("--check", action="store_true", help="only verify that the sessions in --out are still accepted")
+    parser.add_argument("requests", nargs="*", help="COUNT:ROLE, for example 10:sales")
     args = parser.parse_args()
 
     if args.host not in ("127.0.0.1", "localhost") or args.port != 5611:
         raise SystemExit("refusing to sign in anywhere except the isolated performance API on 127.0.0.1:5611")
     if "/.results/" not in os.path.abspath(args.out):
         raise SystemExit("the session file must live inside the git-ignored .results folder")
+    if args.check:
+        with open(args.out) as handle:
+            saved = json.load(handle)["sessions"]
+        bad = 0
+        for session in saved:
+            status, _, _, _ = call(args.host, args.port, "GET", "/api/auth/me", session["cookies"])
+            bad += status != 200
+        print(f"{len(saved) - bad} of {len(saved)} saved sessions are accepted")
+        return 1 if bad else 0
+    if not args.requests:
+        raise SystemExit("nothing to do: give COUNT:ROLE arguments")
     password = os.environ.get("PERF_ACCOUNT_PASSWORD")
     if not password:
         raise SystemExit("PERF_ACCOUNT_PASSWORD is not set")
