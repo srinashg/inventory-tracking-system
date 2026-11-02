@@ -27,7 +27,7 @@ RUN dotnet ef migrations script --idempotent --project backend/database --output
 # Stage 2b is the one-shot "migrate" container: psql, that script, and the script that creates the limited role the API uses.
 # Connection settings (PGHOST, PGUSER, PGPASSWORD, PGDATABASE) and TECHSTORE_APP_DB_PASSWORD are supplied at run time.
 # ON_ERROR_STOP makes any failure a non-zero exit, so the API never starts on a half-migrated database.
-FROM postgres:17-alpine AS migrate
+FROM postgres:18-alpine AS migrate
 COPY --from=migration-script /migrate.sql /migrate/migrate.sql
 COPY backend/database/Provisioning/app-role.sql backend/database/Provisioning/run-provisioning.psql /migrate/
 USER postgres
